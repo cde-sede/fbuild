@@ -85,7 +85,7 @@ struct renv  { struct rbind *head; rval *arg; renv *parent; };
 static rval RV_UNIT = { .k = RV_NONE };
 
 /* All runtime allocations come from the shared program arena (a_alloc / a_grow
- * / a_dup, declared in cparser.h, created by main.c). Nothing is freed per
+ * / a_dup, declared in cparser.h, created by parser.c). Nothing is freed per
  * object. The only non-arena memory is libc-owned (open_memstream / realpath)
  * and the cgen dynamic-array argv, which keep their own malloc/free. */
 

@@ -8,7 +8,7 @@ int main(int argc, char **argv) {
 	NOB_GO_REBUILD_URSELF(argc, argv);
 
 	const char *inputs[] = {
-		"src/build_system.c", "src/main.c", "src/walk.c", "src/run.c",
+		"src/build_system.c", "src/parser.c", "src/walk.c", "src/run.c",
 		"src/eval.c", "src/cparser.h", "src/ast.h", "src/graph.h",
 	};
 	int need = nob_needs_rebuild("fbuild", inputs, NOB_ARRAY_LEN(inputs));
@@ -23,7 +23,7 @@ int main(int argc, char **argv) {
 	nob_cmd_append(&cmd, "-ggdb", "-Icgen");
 	nob_cc_flags(&cmd);
 	nob_cc_output(&cmd, "fbuild");
-	nob_cc_inputs(&cmd, "src/build_system.c", "src/main.c", "src/walk.c",
+	nob_cc_inputs(&cmd, "src/build_system.c", "src/parser.c", "src/walk.c",
 	              "src/run.c", "src/eval.c");
 	if (!nob_cmd_run_sync_and_reset(&cmd)) return 1;
 

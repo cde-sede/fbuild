@@ -6,7 +6,7 @@
 #define MAX_TOKENS 1024
 
 /* Program-lifetime arena (backed by cds_lib/build.h, implemented in run.c,
- * owned/created by main.c). Every allocation in the front-end and the executor
+ * owned/created by parser.c). Every allocation in the front-end and the executor
  * comes from it; nothing is freed individually, the whole arena is released at
  * exit. See arena_init / arena_fini. */
 void  arena_init(void);
