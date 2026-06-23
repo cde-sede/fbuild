@@ -3,15 +3,20 @@
 # compile_commands.json. nob bootstraps the first binary; after that
 #   ./fbuild            # rebuilds itself from this script
 #   ./fbuild -f         # force a full rebuild
+config(map((
+	('jobs', to_int(shell('nproc'))),
+	('silent', true)
+)))
 EXE    = [fbuild]
 SRCS   = glob([src/*.c])
 OBJS   = SRCS |> f -> path([build], cat(stem(f), '.o'))
 HDRS   = concat(glob([src/*.h]), glob([cgen/cds_lib/*.h]), glob([cgen/*.h]))
 CC     = 'cc'
-CFLAGS = '-ggdb', '-Icgen', '-Wall', '-Wextra'
+CFLAGS = '-ggdb', '-Icgen', '-Wall', '-Wextra', '-O2', '-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0'
+log    = l, m -> print(cat('[', l, '] ', m))
 
 FLAGS    = filter(args, e -> starts_with(e, '-'))
-FORCE    = contains(FLAGS, '-f') or contains(FLAGS, '--force')
+FORCE    = (contains(FLAGS, '-f') or contains(FLAGS, '--force'))
 COMMANDS = contains(FLAGS, '--compile-commands')
 
 
@@ -20,7 +25,6 @@ compile = o, s -> `{CC} {...CFLAGS} -c {...s} -o {.o}`
 link    = a, d -> `{CC} {...d} -o {.a}` when stale(.a, ...d) or FORCE
 create_cmd = (f, artifact, @deps -> f(.artifact, ...deps))
 
-# a compile_commands.json entry per translation unit
 entry = o, s -> map((
 	('directory', cwd),
 	('file', .s),
@@ -34,8 +38,8 @@ exe   = create_cmd(link, EXE, OBJS)
 mkdir([build])
 json_write([compile_commands.json], units |> u -> create_cmd(entry, ...u)) when COMMANDS
 
-print("Nothing to build") when not (
-	run(objs >> exe)
+log("INFO", "{EXE} up to date") when not (
+	bench('build', run(objs >> exe))
 		when (contains(args, 'all') or length(args) - length(FLAGS) == 0)
 			and (stale(EXE, ...SRCS, ...OBJS) or FORCE)
 )

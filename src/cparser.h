@@ -42,6 +42,8 @@ typedef enum {
 	TOK_NOT,        // not
 
 	TOK_ASSIGN,     // =
+	TOK_TILDE_ASSIGN, // ~=  eager / re-definable assign
+	TOK_TILDE,      // ~   force re-eval (ignore memoization)
 	TOK_ARROW,      // ->
 	TOK_PIPE,       // |>
 	TOK_MORPH,      // //

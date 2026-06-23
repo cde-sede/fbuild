@@ -14,6 +14,8 @@ char *AST_NODE_NAMES[] = {
 
 	[AST_PROGRAM] = "AST_PROGRAM",
 	[AST_ASSIGN] = "AST_ASSIGN",
+	[AST_EAGER] = "AST_EAGER",
+	[AST_FORCE] = "AST_FORCE",
 	[AST_TUPLE] = "AST_TUPLE",
 	[AST_LAMBDA] = "AST_LAMBDA",
 	[AST_PARAMS] = "AST_PARAMS",
@@ -283,12 +285,15 @@ static int is_builtin_name(token *t) {
 		"take", "drop", "print", "debug",
 		"sort", "unique", "join", "split", "replace",
 		"cat", "upper", "lower", "trim", "starts_with", "ends_with",
+		"capitalize", "title", "lstrip", "rstrip", "strip_prefix", "strip_suffix",
+		"pad_left", "pad_right", "center",
 		"parent", "name", "stem", "suffix", "with_suffix", "with_name",
 		"path", "abs",
 		"json_parse", "json_read", "json_str", "json_pretty", "json_write",
 		"map", "get", "has", "keys", "values", "items",
 		"range", "enumerate", "slice", "index", "reverse", "sum", "min", "max",
 		"count", "find", "to_int", "to_str", "repeat", "chars",
+		"clock", "time", "sleep", "bench", "config",
 		NULL,
 	};
 	for (size_t i = 0; names[i]; i++)
@@ -302,7 +307,8 @@ static obj_type *infer_id(token *name) {
 	if (g_program) {
 		for (size_t i = 0; i < g_program->nkids; i++) {
 			ast *s = g_program->kids[i];
-			if (s->kind == AST_ASSIGN && tok_eq(s->tok, name))
+			if ((s->kind == AST_ASSIGN || s->kind == AST_EAGER)
+			    && tok_eq(s->tok, name))
 				return infer(s->kids[0], NULL);   /* defs are context-free */
 		}
 	}
@@ -342,6 +348,9 @@ static obj_type *infer_call(ast *node, scope *sc) {
 			{"join",2,2}, {"split",2,2}, {"replace",3,3},
 			{"cat",0,-1}, {"upper",1,1}, {"lower",1,1}, {"trim",1,1},
 			{"starts_with",2,2}, {"ends_with",2,2},
+			{"capitalize",1,1}, {"title",1,1}, {"lstrip",1,1}, {"rstrip",1,1},
+			{"strip_prefix",2,2}, {"strip_suffix",2,2},
+			{"pad_left",2,3}, {"pad_right",2,3}, {"center",2,3},
 			{"parent",1,1}, {"name",1,1}, {"stem",1,1}, {"suffix",1,1},
 			{"with_suffix",2,2}, {"with_name",2,2}, {"path",0,-1}, {"abs",1,1},
 			{"run",1,-1}, {"print",0,-1}, {"debug",0,-1},
@@ -353,6 +362,8 @@ static obj_type *infer_call(ast *node, scope *sc) {
 			{"reverse",1,1}, {"sum",1,-1}, {"min",1,-1}, {"max",1,-1},
 			{"count",2,2}, {"find",2,2}, {"to_int",1,1}, {"to_str",1,1},
 			{"repeat",2,2}, {"chars",1,1},
+			{"clock",0,0}, {"time",0,0}, {"sleep",1,1}, {"bench",2,2},
+			{"config",1,1},
 		};
 		for (size_t i = 0; i < sizeof arity / sizeof arity[0]; i++) {
 			if (!tok_is(callee->tok, arity[i].name)) continue;
@@ -386,6 +397,19 @@ static obj_type *infer_call(ast *node, scope *sc) {
 		/* print(...) / debug(...) -> None (side effect only) */
 		if (tok_is(callee->tok, "print") || tok_is(callee->tok, "debug"))
 			return t_new(RET_NONE);
+
+		/* time intrinsics -> Int */
+		if (tok_is(callee->tok, "clock") || tok_is(callee->tok, "time"))
+			return t_new(RET_INT);
+		/* sleep(ms) -> () */
+		if (tok_is(callee->tok, "sleep"))
+			return t_new(RET_NONE);
+		/* config(map) -> () */
+		if (tok_is(callee->tok, "config"))
+			return t_new(RET_NONE);
+		/* bench(label, expr) -> expr's value (dynamic) */
+		if (tok_is(callee->tok, "bench"))
+			return t_new(RET_VAR);
 
 		/* json: values are dynamic (?). */
 		if (tok_is(callee->tok, "json_parse") || tok_is(callee->tok, "json_read")
@@ -437,8 +461,10 @@ static obj_type *infer_call(ast *node, scope *sc) {
 		}
 
 		/* config / process / fs */
-		if (tok_is(callee->tok, "env")    || tok_is(callee->tok, "shell")
-		 || tok_is(callee->tok, "read"))   return t_new(RET_STRING);
+		if (tok_is(callee->tok, "env")    || tok_is(callee->tok, "read"))
+			return t_new(RET_STRING);
+		/* shell(cmd|tuple|list) -> captured String, or nested tuple/list thereof */
+		if (tok_is(callee->tok, "shell")) return t_new(RET_VAR);
 		if (tok_is(callee->tok, "which"))  return t_file();
 		if (tok_is(callee->tok, "exists")) return t_new(RET_BOOL);
 		if (tok_is(callee->tok, "mkdir"))  return t_file();
@@ -464,7 +490,12 @@ static obj_type *infer_call(ast *node, scope *sc) {
 		/* strings */
 		if (tok_is(callee->tok, "join") || tok_is(callee->tok, "replace")
 		 || tok_is(callee->tok, "cat")  || tok_is(callee->tok, "upper")
-		 || tok_is(callee->tok, "lower")|| tok_is(callee->tok, "trim"))
+		 || tok_is(callee->tok, "lower")|| tok_is(callee->tok, "trim")
+		 || tok_is(callee->tok, "capitalize") || tok_is(callee->tok, "title")
+		 || tok_is(callee->tok, "lstrip") || tok_is(callee->tok, "rstrip")
+		 || tok_is(callee->tok, "strip_prefix") || tok_is(callee->tok, "strip_suffix")
+		 || tok_is(callee->tok, "pad_left") || tok_is(callee->tok, "pad_right")
+		 || tok_is(callee->tok, "center"))
 			return t_new(RET_STRING);
 		if (tok_is(callee->tok, "split"))  return t_list(t_new(RET_STRING));
 		if (tok_is(callee->tok, "starts_with") || tok_is(callee->tok, "ends_with"))
@@ -787,9 +818,14 @@ static obj_type *infer(ast *node, scope *sc) {
 		t = t_new(RET_VAR);
 		break;
 
+	case AST_FORCE:                 /* ~x : re-eval x, same type as x */
+		t = infer(node->kids[0], sc);
+		break;
+
 	/* structural nodes carry no value type of their own */
 	case AST_PROGRAM:
 	case AST_ASSIGN:
+	case AST_EAGER:
 	case AST_PARAMS:
 	case AST_WHERE:
 	case AST_BINDING:
@@ -882,8 +918,9 @@ int infer_program(ast *prog) {
 	g_program = prog;
 	for (size_t i = 0; i < prog->nkids; i++) {
 		ast *s = prog->kids[i];
-		infer_type(s->kind == AST_ASSIGN ? s->kids[0] : s);  /* type-check */
-		if (s->kind == AST_ASSIGN)
+		int is_def = (s->kind == AST_ASSIGN || s->kind == AST_EAGER);
+		infer_type(is_def ? s->kids[0] : s);  /* type-check */
+		if (is_def)
 			check_recursion(s->tok, s->kids[0], 0);
 	}
 	if (g_type_errors)

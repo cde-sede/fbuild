@@ -374,6 +374,14 @@ static void lex(char *s)
 			continue;
 		}
 
+		if (!strncmp(s + i, "~=", 2)) {
+			emit(TOK_TILDE_ASSIGN, s + i, 2,
+			     sl, sc, line, col + 1);
+			i += 2;
+			col += 2;
+			continue;
+		}
+
 		if (!strncmp(s + i, "|>", 2)) {
 			emit(TOK_PIPE, s + i, 2,
 			     sl, sc, line, col + 1);
@@ -530,6 +538,11 @@ static void lex(char *s)
 			     sl, sc, line, col);
 			break;
 
+		case '~':
+			emit(TOK_TILDE, s+i, 1,
+			     sl, sc, line, col);
+			break;
+
 		case '.':
 			emit(TOK_DOT, s+i, 1,
 			     sl, sc, line, col);
@@ -644,6 +657,8 @@ static inline int printable(tok_kind k) {
 const char *ast_name[] = {
 	[AST_PROGRAM]="program",
 	[AST_ASSIGN]="assign",
+	[AST_EAGER]="eager",
+	[AST_FORCE]="force",
 	[AST_TUPLE]="tuple",
 	[AST_LAMBDA]="lambda",
 	[AST_PARAMS]="params",
@@ -778,6 +793,13 @@ static ast *parse_atom(void) {
 	}
 	case TOK_AMP: {                      /* metadata: "&" primary */
 		ast *n = node(AST_METADATA);
+		n->tok = t;
+		tok_advance();
+		push(n, parse_postfix());
+		return n;
+	}
+	case TOK_TILDE: {                    /* force re-eval: "~" postfix */
+		ast *n = node(AST_FORCE);
 		n->tok = t;
 		tok_advance();
 		push(n, parse_postfix());
@@ -1298,6 +1320,15 @@ static ast *parse_expression(void) {
 		skip_nl();
 		push(a, parse_expression());
 		res = a;
+	} else if (peek(.kind = TOK_ID) && sig_from(cur + 1) == TOK_TILDE_ASSIGN) {
+		ast *a = node(AST_EAGER);
+		a->tok = tok_cur();
+		tok_advance();   /* identifier */
+		skip_nl();
+		tok_advance();   /* "~=" */
+		skip_nl();
+		push(a, parse_expression());
+		res = a;
 	} else {
 		/* a multi-parameter lambda (commas in its param list) is only
 		 * recognized here at the top level, not inside an argument/tuple
@@ -1484,7 +1515,10 @@ static const char *find_script(void) {
 }
 
 int main(int ac, char **av) {
-	(void)ac;
+	if (ac == 2 && !strcmp(av[1], "--version")) {
+		printf("fbuild %s\n", fbuild_version());
+		return 0;
+	}
 	g_stderr_tty = isatty(STDERR_FILENO) ? 1 : 0;
 	struct sigaction sa = {0};
 	sa.sa_handler = on_sigint;

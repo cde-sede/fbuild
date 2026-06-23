@@ -18,6 +18,12 @@
     DA_DECL_GENERIC(int, func)
 #define BUILD_TAIL_LINES 5
 #define BUILD_IMPLEMENTATION
+
+/* embed a version string in the .my_metadata section via build.h's METADATA
+ * mechanism; build_info.version is read back by fbuild_version(). */
+#define FBUILD_VERSION "0.1.5"
+#define _version FBUILD_VERSION
+#define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
 
 #include <dirent.h>
@@ -26,6 +32,7 @@
 #include <sys/syscall.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <time.h>
 
 typedef void* voidptr;
 typedef DECL_DA(voidptr) t_da_voidptr;
@@ -227,6 +234,7 @@ static rval  *g_cwd;           /* the `cwd` builtin variable (String) */
  * is drawing the build graph). Output produced during a run is queued and
  * flushed once the event loop finishes. */
 static int    g_in_run;
+static int    g_bench;          /* --bench on the CLI: emit bench() timings */
 static char **g_print_q;       /* arena-backed; lines are arena strings */
 static size_t g_print_n, g_print_cap;
 
@@ -255,6 +263,7 @@ static void print_flush(void) {
 }
 
 static rval *eval(ast *n, renv *e);
+static rval *do_shell(rval *v);
 
 /* Add one tuple-literal element, flattening splats and dropping elements whose
  * `when` guard is false (so `(...RANGE(n-1) when n>0, n)` collapses cleanly). */
@@ -303,6 +312,7 @@ static int effectful_call(ast *n) {
 }
 static int ast_pure(ast *n) {
 	if (!n) return 1;
+	if (n->kind == AST_FORCE) return 0;         /* ~x re-evals: never memoize */
 	if (effectful_call(n)) return 0;
 	if (n->kind == AST_LAMBDA) return 1;        /* body deferred to apply */
 	for (size_t i = 0; i < n->nkids; i++)
@@ -323,6 +333,23 @@ static rval *def_lookup(token *name) {
 			if (v && !v->label)
 				v->label = dup_tok(name);           /* group label */
 			if (d->pure) d->val = v;                /* cache pure defs only */
+			return v;
+		}
+	return NULL;
+}
+
+/* like def_lookup but ignores (and does not populate) the memo cache: the rhs
+ * is re-evaluated every call. Backs the "~x" force operator. */
+static rval *def_force(token *name) {
+	for (size_t i = 0; i < g_ndefs; i++)
+		if (tok_eq(g_defs[i].name, name)) {
+			def *d = &g_defs[i];
+			if (d->doing) fatal("cyclic definition '%.*s'",
+			                    (int)name->len, name->string);
+			d->doing = 1;
+			rval *v = eval(d->rhs, &g_top);
+			d->doing = 0;
+			if (v && !v->label) v->label = dup_tok(name);
 			return v;
 		}
 	return NULL;
@@ -606,6 +633,67 @@ static const char *pstr(rval *v) {
 
 /* config / process ----------------------------------------------------- */
 
+/* monotonic clock in nanoseconds; subtract two reads to time a section. */
+static rval *do_clock(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return rv_int((long)ts.tv_sec * 1000000000L + ts.tv_nsec);
+}
+/* wall-clock unix epoch, in seconds. */
+static rval *do_time(void) {
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	return rv_int((long)ts.tv_sec);
+}
+/* sleep for the given number of milliseconds; returns (). */
+static rval *do_sleep(rval *ms) {
+	long m = (ms && ms->k == RV_INT) ? ms->i : 0;
+	if (m > 0) {
+		struct timespec ts;
+		ts.tv_sec  = m / 1000;
+		ts.tv_nsec = (m % 1000) * 1000000L;
+		nanosleep(&ts, NULL);
+	}
+	return &RV_UNIT;
+}
+
+/* config spinner: a language lambda (Int -> String). The build runtime calls
+ * spin_trampoline() each refresh with this command's frame counter; we apply the
+ * lambda and hand back its string (arena-owned, valid until the next call). */
+static rval *g_spinner;
+static const char *spin_trampoline(int n) {
+	if (!g_spinner) return "";
+	const char *s = as_cstr(apply(g_spinner, rv_int(n)));
+	return s ? s : "";
+}
+
+/* config(map): apply build-script settings. Recognized keys:
+ *   jobs       : Int           cap concurrent child procs in PARALLEL groups
+ *   verbose    : Bool          show every command's output (no collapse)
+ *   keep_going : Bool          run all tasks, report failures at the end
+ *   silent     : Bool          suppress the live UI
+ *   color      : Bool          force the live UI on (true) / off (false)
+ *   spinner_ms : Int           display refresh period in ms
+ *   tail_lines : Int           live-output lines under a running command
+ *   spinner    : (Int->String) custom spinner glyph per frame
+ * Unknown keys are ignored so scripts stay forward-compatible. */
+static rval *do_config(rval *m) {
+	if (!m || m->k != RV_MAP) return &RV_UNIT;
+	rval *v;
+	if ((v = map_get(m, "jobs"))       && v->k == RV_INT)    build_set_jobs((int)v->i);
+	if ((v = map_get(m, "verbose"))    && v->k != RV_NONE)   build_set_verbose(truthy(v));
+	if ((v = map_get(m, "keep_going")) && v->k != RV_NONE)   build_set_keep_going(truthy(v));
+	if ((v = map_get(m, "silent"))     && v->k != RV_NONE)   build_set_silent(truthy(v));
+	if ((v = map_get(m, "color"))      && v->k != RV_NONE)   build_set_color(truthy(v) ? 1 : 2);
+	if ((v = map_get(m, "spinner_ms")) && v->k == RV_INT)    build_set_spinner_ms(v->i);
+	if ((v = map_get(m, "tail_lines")) && v->k == RV_INT)    build_set_tail_lines((int)v->i);
+	if ((v = map_get(m, "spinner"))    && v->k == RV_LAMBDA) {
+		g_spinner = v;
+		build_set_spinner_fn(spin_trampoline);
+	}
+	return &RV_UNIT;
+}
+
 static rval *do_env(const char *name) {
 	char *v = getenv(name);
 	if (!v) return &RV_UNIT;            /* unset -> () (falsy), so `env(x) || d` works */
@@ -613,22 +701,6 @@ static rval *do_env(const char *name) {
 }
 
 /* run a command via the shell, capture stdout, trim trailing newlines */
-static rval *do_shell(const char *cmd) {
-	FILE *f = popen(cmd, "r");
-	if (!f) return rv_str(a_dup(""));
-	size_t cap = 256, n = 0;
-	char *b = a_alloc(cap);
-	int c;
-	while ((c = fgetc(f)) != EOF) {
-		if (n + 1 >= cap) { b = a_grow(b, n, cap * 2); cap *= 2; }
-		b[n++] = (char)c;
-	}
-	pclose(f);
-	while (n && (b[n - 1] == '\n' || b[n - 1] == '\r')) n--;
-	b[n] = '\0';
-	return rv_str(b);
-}
-
 static rval *do_which(const char *name) {
 	if (strchr(name, '/'))
 		return access(name, X_OK) == 0 ? rv_file(a_dup(name)) : rv_str(a_dup(""));
@@ -1049,6 +1121,59 @@ static rval *do_ends_with(rval *v, rval *p) {
 	size_t ls = strlen(s), lf = strlen(suf);
 	return rv_bool(lf <= ls && strcmp(s + ls - lf, suf) == 0);
 }
+static rval *do_capitalize(rval *v) {           /* first upper, rest lower */
+	char *s = a_dup(as_cstr(v));
+	if (s[0]) {
+		s[0] = (char)toupper((unsigned char)s[0]);
+		for (char *p = s + 1; *p; p++) *p = (char)tolower((unsigned char)*p);
+	}
+	return rv_str(s);
+}
+static rval *do_title(rval *v) {                 /* capitalize each word */
+	char *s = a_dup(as_cstr(v));
+	int start = 1;
+	for (char *p = s; *p; p++) {
+		if (isspace((unsigned char)*p)) { start = 1; continue; }
+		*p = start ? (char)toupper((unsigned char)*p) : (char)tolower((unsigned char)*p);
+		start = 0;
+	}
+	return rv_str(s);
+}
+static rval *do_lstrip(rval *v) {
+	const char *s = as_cstr(v);
+	while (isspace((unsigned char)*s)) s++;
+	return rv_str(a_dup(s));
+}
+static rval *do_rstrip(rval *v) {
+	const char *s = as_cstr(v);
+	size_t l = strlen(s);
+	while (l && isspace((unsigned char)s[l - 1])) l--;
+	return rv_str(a_dupn(s, l));
+}
+static rval *do_strip_prefix(rval *v, rval *p) {
+	const char *s = as_cstr(v), *pre = as_cstr(p);
+	size_t lp = strlen(pre);
+	return rv_str(a_dup(strncmp(s, pre, lp) == 0 ? s + lp : s));
+}
+static rval *do_strip_suffix(rval *v, rval *p) {
+	const char *s = as_cstr(v), *suf = as_cstr(p);
+	size_t ls = strlen(s), lf = strlen(suf);
+	if (lf <= ls && strcmp(s + ls - lf, suf) == 0) return rv_str(a_dupn(s, ls - lf));
+	return rv_str(a_dup(s));
+}
+/* pad s to width with fill; side: -1 pad left, +1 pad right, 0 center */
+static rval *pad_to(const char *s, long width, char fill, int side) {
+	size_t l = strlen(s);
+	if (width < 0 || (size_t)width <= l) return rv_str(a_dupn(s, l));
+	size_t total = (size_t)width, padn = total - l;
+	size_t lpad = side < 0 ? padn : side > 0 ? 0 : padn / 2;
+	char *b = a_alloc(total + 1);
+	memset(b, fill, lpad);
+	memcpy(b + lpad, s, l);
+	memset(b + lpad + l, fill, total - lpad - l);
+	b[total] = '\0';
+	return rv_str(b);
+}
 
 /* more path ops ----------------------------------------------------------- */
 
@@ -1412,6 +1537,14 @@ static rval *do_json_str(rval *v, int pretty) {
 static rval *do_map(rval *items) {
 	rval *m = rv(RV_MAP);
 	if (!is_seq(items)) return m;
+	/* A single entry can't be written as a 1-element list: `map(('k', v))`
+	 * parses as the bare pair ('k', v), not a list holding one pair. Detect that
+	 * (first element is not itself a pair) and treat the whole thing as one entry. */
+	if (items->n >= 2 && items->items[0]
+	    && items->items[0]->k != RV_TUPLE && items->items[0]->k != RV_LIST) {
+		map_set(m, a_dup(as_cstr(items->items[0])), items->items[1]);
+		return m;
+	}
 	for (size_t i = 0; i < items->n; i++) {
 		rval *kv = items->items[i];
 		if (kv && (kv->k == RV_TUPLE || kv->k == RV_LIST) && kv->n >= 2)
@@ -1474,7 +1607,7 @@ static int is_builtin(const char *s) {
 static rval *call_builtin1(const char *n, rval *a) {
 	if (!strcmp(n, "glob"))    return do_glob(as_cstr(a));
 	if (!strcmp(n, "env"))     return do_env(as_cstr(a));
-	if (!strcmp(n, "shell"))   return do_shell(as_cstr(a));
+	if (!strcmp(n, "shell"))   return do_shell(a);
 	if (!strcmp(n, "which"))   return do_which(as_cstr(a));
 	if (!strcmp(n, "exists"))  return do_exists(a);
 	if (!strcmp(n, "mkdir"))   return do_mkdir(a);
@@ -1513,6 +1646,10 @@ static rval *call_builtin1(const char *n, rval *a) {
 	if (!strcmp(n, "upper"))   return do_upper(a);
 	if (!strcmp(n, "lower"))   return do_lower(a);
 	if (!strcmp(n, "trim"))    return do_trim(a);
+	if (!strcmp(n, "capitalize")) return do_capitalize(a);
+	if (!strcmp(n, "title"))   return do_title(a);
+	if (!strcmp(n, "lstrip"))  return do_lstrip(a);
+	if (!strcmp(n, "rstrip"))  return do_rstrip(a);
 	if (!strcmp(n, "abs"))     return do_abs(a);
 	return &RV_UNIT;
 }
@@ -1631,6 +1768,9 @@ CORO_DEF(run_coro, args, { rval *root; })
 
 static void run_tree(rval *root) {
 	if (!has_cmd(root)) return;
+	/* silent build: echo each command as it starts (make-style), since the live
+	 * UI that would show it is suppressed. shell() capture turns this off. */
+	build_set_echo_start(build_get_silent());
 	t_loop *loop = create_loop();
 	g_in_run = 1;             /* RUN() may execute the coro body synchronously */
 	RUN(loop, run_coro, .root = root);
@@ -1638,6 +1778,67 @@ static void run_tree(rval *root) {
 	destroy_loop(loop);
 	g_in_run = 0;
 	print_flush();            /* emit anything print/debug queued during the run */
+}
+
+/* shell(v): like run() but silent (no UI), returning each child's captured
+ * output as a String instead of streaming it. Reuses the library's capturing
+ * runner (build_seq_visual into a silent group); we read back the per-command
+ * build__buf and free what the group would otherwise hand to build_flush_outputs. */
+static rval *capture_cmd(rval *v) {
+	t_group_ctx grp = { .opts = { .silent = OPT_TRUE } };
+	t_cmd c = {0};
+	collect(v, &c);                       /* one argv (+ NULL terminator) */
+
+	build_set_echo_start(0);              /* capture is quiet: no make-style echo */
+	build_seq_visual(&c, g_env, &grp);    /* runs silent, captures into grp */
+
+	size_t total = 0;
+	for (size_t i = 0; i < grp.cmd_count; i++) {
+		build__buf *b = (build__buf *)grp.commands[i].output;
+		if (b) total += b->count;
+	}
+	char *out = a_alloc(total + 1);
+	size_t n = 0;
+	for (size_t i = 0; i < grp.cmd_count; i++) {
+		build__buf *b = (build__buf *)grp.commands[i].output;
+		if (b) {
+			if (b->count) { memcpy(out + n, b->items, b->count); n += b->count; }
+			free(b->items);
+			free(b);
+		}
+		free(grp.commands[i].repr);
+	}
+	free(grp.commands);
+
+	while (n && (out[n - 1] == '\n' || out[n - 1] == '\r')) n--;   /* trim trailing newline */
+	out[n] = '\0';
+	return rv_str(out);
+}
+
+static rval *do_shell(rval *v) {
+	if (!v) return rv_str(a_dup(""));
+	switch (v->k) {
+	case RV_TUPLE: {                       /* nest captured strings per structure */
+		rval *t = rv(RV_TUPLE);
+		for (size_t i = 0; i < v->n; i++) rv_push(t, do_shell(v->items[i]));
+		return t;
+	}
+	case RV_LIST: {
+		rval *l = rv(RV_LIST);
+		for (size_t i = 0; i < v->n; i++) rv_push(l, do_shell(v->items[i]));
+		return l;
+	}
+	case RV_SEQ: {
+		rval *t = rv(RV_TUPLE);
+		for (size_t i = 0; i < v->body->nkids; i++)
+			rv_push(t, do_shell(eval(v->body->kids[i], v->env)));
+		return t;
+	}
+	case RV_CMD:
+		return capture_cmd(v);
+	default:
+		return rv_str(a_dup(""));
+	}
 }
 
 /* ---- command building ------------------------------------------------- */
@@ -1687,6 +1888,28 @@ static rval *eval(ast *n, renv *e) {
 		return rv_str(b);
 	}
 	case AST_PATH:   return rv_file(dup_tok(n->tok));
+
+	case AST_EAGER: {
+		/* "~=": evaluate now and bind into the current scope, shadowing any
+		 * lazy `=` def of the same name (env_get is consulted before defs). */
+		rval *v = eval(n->kids[0], e);
+		if (v && !v->label) v->label = dup_tok(n->tok);
+		env_put(e, n->tok, v);
+		return v;
+	}
+
+	case AST_FORCE: {
+		/* "~x": re-evaluate x ignoring memoization. For a lazy top-level def
+		 * that means re-running its rhs; an env-bound value is already final. */
+		ast *operand = n->kids[0];
+		if (operand->kind == AST_ID) {
+			rval *b = env_get(e, operand->tok);
+			if (b) return b;
+			rval *d = def_force(operand->tok);
+			if (d) return d;
+		}
+		return eval(operand, e);
+	}
 
 	case AST_ID: {
 		rval *b = env_get(e, n->tok);
@@ -1931,6 +2154,26 @@ static rval *eval(ast *n, renv *e) {
 				run_tree(target);
 				return rv_bool(ran);                 /* true=ran, false=nothing */
 			}
+			if (tok_is(callee->tok, "bench")) {
+				/* bench(label, expr): time the *unevaluated* expr (so a run/seq
+				 * inside is actually executed between the two clock reads) and
+				 * print the elapsed wall time -- only when --bench is set.
+				 * Returns expr's value so it stays transparent in a pipeline. */
+				const char *label = as_cstr(eval(n->kids[1], e));
+				struct timespec t0, t1;
+				clock_gettime(CLOCK_MONOTONIC, &t0);
+				rval *r = eval(n->kids[2], e);
+				clock_gettime(CLOCK_MONOTONIC, &t1);
+				if (g_bench) {
+					double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3
+					          + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+					size_t cap = strlen(label) + 64;
+					char *line = a_alloc(cap);
+					snprintf(line, cap, "[bench] %s: %.3f ms", label, ms);
+					print_emit(line);
+				}
+				return r;
+			}
 			if (tok_is(callee->tok, "print") || tok_is(callee->tok, "debug")) {
 				int dbg = tok_is(callee->tok, "debug");
 				size_t k;
@@ -1951,9 +2194,13 @@ static rval *eval(ast *n, renv *e) {
 			if (tok_is(callee->tok, "keys"))   return do_keys(A(1));
 			if (tok_is(callee->tok, "values")) return do_values(A(1));
 			if (tok_is(callee->tok, "items"))  return do_items(A(1));
-			/* config / process */
+			/* time / config / process */
+			if (tok_is(callee->tok, "clock"))  return do_clock();
+			if (tok_is(callee->tok, "time"))   return do_time();
+			if (tok_is(callee->tok, "sleep"))  return do_sleep(A(1));
+			if (tok_is(callee->tok, "config")) return do_config(A(1));
 			if (tok_is(callee->tok, "env"))    return do_env(as_cstr(A(1)));
-			if (tok_is(callee->tok, "shell"))  return do_shell(as_cstr(A(1)));
+			if (tok_is(callee->tok, "shell"))  return do_shell(A(1));
 			if (tok_is(callee->tok, "which"))  return do_which(as_cstr(A(1)));
 			/* filesystem */
 			if (tok_is(callee->tok, "exists")) return do_exists(A(1));
@@ -2005,6 +2252,20 @@ static rval *eval(ast *n, renv *e) {
 			if (tok_is(callee->tok, "upper"))   return do_upper(A(1));
 			if (tok_is(callee->tok, "lower"))   return do_lower(A(1));
 			if (tok_is(callee->tok, "trim"))    return do_trim(A(1));
+			if (tok_is(callee->tok, "capitalize")) return do_capitalize(A(1));
+			if (tok_is(callee->tok, "title"))   return do_title(A(1));
+			if (tok_is(callee->tok, "lstrip"))  return do_lstrip(A(1));
+			if (tok_is(callee->tok, "rstrip"))  return do_rstrip(A(1));
+			if (tok_is(callee->tok, "strip_prefix")) return do_strip_prefix(A(1), A(2));
+			if (tok_is(callee->tok, "strip_suffix")) return do_strip_suffix(A(1), A(2));
+			if (tok_is(callee->tok, "pad_left") || tok_is(callee->tok, "pad_right")
+			 || tok_is(callee->tok, "center")) {
+				char fill = ' ';
+				if (na >= 3) { const char *f = as_cstr(A(3)); if (f[0]) fill = f[0]; }
+				int side = tok_is(callee->tok, "pad_left") ? -1
+				         : tok_is(callee->tok, "pad_right") ? 1 : 0;
+				return pad_to(as_cstr(A(1)), A(2)->i, fill, side);
+			}
 			if (tok_is(callee->tok, "starts_with")) return do_starts_with(A(1), A(2));
 			if (tok_is(callee->tok, "ends_with"))   return do_ends_with(A(1), A(2));
 			if (tok_is(callee->tok, "find"))    return do_find(as_cstr(A(1)), as_cstr(A(2)));
@@ -2053,11 +2314,16 @@ static rval *eval(ast *n, renv *e) {
 
 /* ---- driver ----------------------------------------------------------- */
 
+/* version string embedded in .my_metadata (see build_info above). */
+const char *fbuild_version(void) { return build_info.version; }
+
 void run_program(ast *prog, int argc, char **argv) {
 	/* language-level `args` = all CLI args (script is auto-discovered) */
 	g_args = rv(RV_LIST);
-	for (int i = 1; i < argc; i++)
+	for (int i = 1; i < argc; i++) {
 		rv_push(g_args, rv_str(a_dup(argv[i])));
+		if (!strcmp(argv[i], "--bench")) g_bench = 1;
+	}
 
 	g_cwd = rv(RV_STR);
 	g_cwd->s = a_alloc(1024);
