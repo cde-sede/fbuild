@@ -11,6 +11,8 @@ typedef enum {
 	AST_EAGER,      /* tok = name id, kids[0] = value; "~=" eager  */
 	AST_FORCE,      /* tok = "~", kids[0]=operand; re-eval, no memo */
 	AST_TUPLE,      /* kids = elements (>= 2)                      */
+	AST_MAPLIT,     /* kids = entries, each AST_TUPLE(key,value)   */
+	AST_PARSER,     /* kids[0] = schema map; Parser<schema>(argv)  */
 	AST_LAMBDA,     /* kids[0]=AST_PARAMS, kids[1]=body            */
 	AST_PARAMS,     /* kids = parameters                           */
 	AST_SEQ,        /* kids = operands of ">>"                     */

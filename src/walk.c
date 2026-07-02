@@ -1,4 +1,5 @@
 #include "ast.h"
+#include "fbuild.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,8 @@ char *AST_NODE_NAMES[] = {
 	[AST_EAGER] = "AST_EAGER",
 	[AST_FORCE] = "AST_FORCE",
 	[AST_TUPLE] = "AST_TUPLE",
+	[AST_MAPLIT] = "AST_MAPLIT",
+	[AST_PARSER] = "AST_PARSER",
 	[AST_LAMBDA] = "AST_LAMBDA",
 	[AST_PARAMS] = "AST_PARAMS",
 	[AST_SEQ] = "AST_SEQ",
@@ -119,6 +122,22 @@ static obj_type *t_file(void) {
 	rec_push(f, &FF_mtime,  t_new(RET_INT));
 	rec_push(f, &FF_size,   t_new(RET_INT));
 	return f;
+}
+
+/* map a registered builtin's declared return type (fbuild.h) to a checker type.
+ * Map/Json and ANY are RET_VAR (unknown): field access stays permissive. */
+static obj_type *fb_ret_type(fb_Ret r) {
+	switch (r) {
+	case FB_RET_INT:  return t_new(RET_INT);
+	case FB_RET_STR:  return t_new(RET_STRING);
+	case FB_RET_BOOL: return t_new(RET_BOOL);
+	case FB_RET_FILE: return t_file();
+	case FB_RET_LIST: return t_list(t_new(RET_VAR));
+	case FB_RET_UNIT: return t_new(RET_NONE);
+	case FB_RET_MAP:
+	case FB_RET_ANY:
+	default:          return t_new(RET_VAR);
+	}
 }
 
 /* ---- error reporting + unification ------------------------------------ */
@@ -290,15 +309,16 @@ static int is_builtin_name(token *t) {
 		"parent", "name", "stem", "suffix", "with_suffix", "with_name",
 		"path", "abs",
 		"json_parse", "json_read", "json_str", "json_pretty", "json_write",
-		"map", "get", "has", "keys", "values", "items",
+		"get", "has", "keys", "values", "items",
 		"range", "enumerate", "slice", "index", "reverse", "sum", "min", "max",
 		"count", "find", "to_int", "to_str", "repeat", "chars",
 		"clock", "time", "sleep", "bench", "config",
+		"flag", "opt", "positionals",
 		NULL,
 	};
 	for (size_t i = 0; names[i]; i++)
 		if (tok_is(t, names[i])) return 1;
-	return 0;
+	return fb_reg_findn(t->string, t->len) != NULL;   /* registered builtin */
 }
 
 /* resolve an identifier not bound in any lambda/where scope: a top-level def,
@@ -356,14 +376,14 @@ static obj_type *infer_call(ast *node, scope *sc) {
 			{"run",1,-1}, {"print",0,-1}, {"debug",0,-1},
 			{"json_parse",1,1}, {"json_read",1,1}, {"json_str",1,1},
 			{"json_pretty",1,1}, {"json_write",2,2},
-			{"map",1,1}, {"get",2,2}, {"has",2,2},
+			{"get",2,2}, {"has",2,2},
 			{"keys",1,1}, {"values",1,1}, {"items",1,1},
 			{"range",1,2}, {"enumerate",1,1}, {"slice",3,3}, {"index",2,3},
 			{"reverse",1,1}, {"sum",1,-1}, {"min",1,-1}, {"max",1,-1},
 			{"count",2,2}, {"find",2,2}, {"to_int",1,1}, {"to_str",1,1},
 			{"repeat",2,2}, {"chars",1,1},
 			{"clock",0,0}, {"time",0,0}, {"sleep",1,1}, {"bench",2,2},
-			{"config",1,1},
+			{"config",1,1}, {"flag",1,-1}, {"opt",2,2}, {"positionals",0,0},
 		};
 		for (size_t i = 0; i < sizeof arity / sizeof arity[0]; i++) {
 			if (!tok_is(callee->tok, arity[i].name)) continue;
@@ -380,6 +400,24 @@ static obj_type *infer_call(ast *node, scope *sc) {
 					         arity[i].name, mn, mx, na);
 			}
 			break;
+		}
+
+		/* registered (host/plugin) builtin: arity + return type from the
+		 * shared registry (fbuild.h), so extensions type-check like core. */
+		const fb_Reg *rg = fb_reg_findn(callee->tok->string, callee->tok->len);
+		if (rg) {
+			if ((int)na < rg->min || (rg->max >= 0 && (int)na > rg->max)) {
+				if (rg->max < 0)
+					type_err(callee->tok, "%s expects at least %d argument%s, got %zu",
+					         rg->name, rg->min, rg->min == 1 ? "" : "s", na);
+				else if (rg->min == rg->max)
+					type_err(callee->tok, "%s expects %d argument%s, got %zu",
+					         rg->name, rg->min, rg->min == 1 ? "" : "s", na);
+				else
+					type_err(callee->tok, "%s expects %d to %d arguments, got %zu",
+					         rg->name, rg->min, rg->max, na);
+			}
+			return fb_ret_type(rg->ret);
 		}
 
 		/* glob(pattern) -> List<File> */
@@ -407,13 +445,17 @@ static obj_type *infer_call(ast *node, scope *sc) {
 		/* config(map) -> () */
 		if (tok_is(callee->tok, "config"))
 			return t_new(RET_NONE);
+		/* CLI arg helpers */
+		if (tok_is(callee->tok, "flag"))   return t_new(RET_BOOL);
+		if (tok_is(callee->tok, "opt"))    return t_new(RET_STRING);
+		if (tok_is(callee->tok, "positionals")) return t_list(t_new(RET_STRING));
 		/* bench(label, expr) -> expr's value (dynamic) */
 		if (tok_is(callee->tok, "bench"))
 			return t_new(RET_VAR);
 
 		/* json: values are dynamic (?). */
 		if (tok_is(callee->tok, "json_parse") || tok_is(callee->tok, "json_read")
-		 || tok_is(callee->tok, "map") || tok_is(callee->tok, "get"))
+		 || tok_is(callee->tok, "get"))
 			return t_new(RET_VAR);
 		if (tok_is(callee->tok, "json_str") || tok_is(callee->tok, "json_pretty"))
 			return t_new(RET_STRING);
@@ -820,6 +862,17 @@ static obj_type *infer(ast *node, scope *sc) {
 
 	case AST_FORCE:                 /* ~x : re-eval x, same type as x */
 		t = infer(node->kids[0], sc);
+		break;
+
+	case AST_MAPLIT:                /* { k: v } / Map<...> : dynamic map */
+		for (size_t i = 0; i < node->nkids; i++)
+			infer(node->kids[i], sc);   /* type-check entries */
+		t = t_new(RET_VAR);
+		break;
+
+	case AST_PARSER:               /* Parser<schema> : dynamic map of results */
+		infer(node->kids[0], sc);
+		t = t_new(RET_VAR);
 		break;
 
 	/* structural nodes carry no value type of their own */

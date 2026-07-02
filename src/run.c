@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.5"
+#define FBUILD_VERSION "0.1.7"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -48,6 +48,11 @@ DECL_DA_FUNCTIONS(int, 256, realloc, free);
 #include "connex.h"
 
 #include "ast.h"
+#include "cparser.h"
+#include "fbuild.h"
+
+#include <setjmp.h>
+#include <stdarg.h>
 
 #define fatal(...) do { fprintf(stderr, "run: " __VA_ARGS__); \
                         fputc('\n', stderr); exit(1); } while (0)
@@ -264,6 +269,7 @@ static void print_flush(void) {
 
 static rval *eval(ast *n, renv *e);
 static rval *do_shell(rval *v);
+static rval *do_pkgconfig(const char *name);
 
 /* Add one tuple-literal element, flattening splats and dropping elements whose
  * `when` guard is false (so `(...RANGE(n-1) when n>0, n)` collapses cleanly). */
@@ -618,6 +624,118 @@ static rval *apply(rval *fn, rval *arg) {
 	return &RV_UNIT;
 }
 
+/* ============================================================================
+ * Extension ABI (fbuild.h) — single implicit state (S0).
+ * A registry of host/plugin builtins, thin value constructors/accessors over
+ * rval + the arena, and an error boundary. Core builtins still live in the
+ * eval() if-chains; the registry is consulted for anything not matched there,
+ * so registered names extend the language without touching core.
+ * ========================================================================== */
+
+struct fb_State {
+	jmp_buf err_jmp;      /* protected-call boundary (unused by the CLI) */
+	int     err_set;      /* 1 when a boundary is installed              */
+	char    err_msg[512];
+};
+
+static struct fb_State g_fb_state;
+
+#define FB_MAX_REG 256
+static fb_Reg g_regs[FB_MAX_REG];
+static int    g_nreg;
+
+void fb_register(fb_State *S, const fb_Reg *reg) {
+	(void)S;
+	if (!reg || !reg->name || !reg->fn) return;
+	for (int i = 0; i < g_nreg; i++)          /* last registration wins */
+		if (!strcmp(g_regs[i].name, reg->name)) { g_regs[i] = *reg; return; }
+	if (g_nreg < FB_MAX_REG) g_regs[g_nreg++] = *reg;
+}
+const fb_Reg *fb_reg_findn(const char *name, size_t len) {
+	for (int i = 0; i < g_nreg; i++)
+		if (!strncmp(g_regs[i].name, name, len) && g_regs[i].name[len] == '\0')
+			return &g_regs[i];
+	return NULL;
+}
+const fb_Reg *fb_reg_find(const char *name) {
+	return fb_reg_findn(name, strlen(name));
+}
+static const fb_Reg *fb_reg_find_tok(token *t) {
+	return t ? fb_reg_findn(t->string, t->len) : NULL;
+}
+
+/* value constructors */
+fb_Value fb_nil (fb_State *S)              { (void)S; return (fb_Value)&RV_UNIT; }
+fb_Value fb_int (fb_State *S, long v)      { (void)S; return (fb_Value)rv_int(v); }
+fb_Value fb_bool(fb_State *S, int v)       { (void)S; return (fb_Value)rv_bool(v); }
+fb_Value fb_str (fb_State *S, const char *s){ (void)S; return (fb_Value)rv_str(a_dup(s ? s : "")); }
+fb_Value fb_file(fb_State *S, const char *p){ (void)S; return (fb_Value)rv_file(a_dup(p ? p : "")); }
+fb_Value fb_list(fb_State *S)              { (void)S; return (fb_Value)rv(RV_LIST); }
+fb_Value fb_map (fb_State *S)              { (void)S; return (fb_Value)rv(RV_MAP); }
+void     fb_push(fb_State *S, fb_Value l, fb_Value e) { (void)S; rv_push((rval*)l, (rval*)e); }
+void     fb_set (fb_State *S, fb_Value m, const char *k, fb_Value v) {
+	(void)S; map_set((rval*)m, a_dup(k ? k : ""), (rval*)v);
+}
+
+/* value inspection */
+fb_Kind fb_kind(fb_Value v) {
+	rval *r = (rval*)v;
+	if (!r) return FB_NIL;
+	switch (r->k) {
+	case RV_NONE:   return FB_NIL;
+	case RV_INT:    return FB_INT;
+	case RV_STR:    return FB_STR;
+	case RV_BOOL:   return FB_BOOL;
+	case RV_FILE:   return FB_FILE;
+	case RV_LIST:   return FB_LIST;
+	case RV_TUPLE:  return FB_TUPLE;
+	case RV_CMD:    return FB_CMD;
+	case RV_MAP:    return FB_MAP;
+	case RV_LAMBDA: return FB_LAMBDA;
+	default:        return FB_OTHER;
+	}
+}
+long        fb_toint(fb_Value v)             { rval *r=(rval*)v; return r ? r->i : 0; }
+const char *fb_tostr(fb_State *S, fb_Value v){ (void)S; return as_cstr((rval*)v); }
+int         fb_len  (fb_Value v)             { rval *r=(rval*)v; return r ? (int)r->n : 0; }
+fb_Value    fb_at   (fb_Value v, int i) {
+	rval *r=(rval*)v;
+	if (!r || i < 0 || (size_t)i >= r->n) return (fb_Value)&RV_UNIT;
+	return (fb_Value)r->items[i];
+}
+fb_Value    fb_field(fb_Value v, const char *k) { return (fb_Value)map_get((rval*)v, k ? k : ""); }
+
+fb_Value fb_apply(fb_State *S, fb_Value fn, fb_Value *args, int nargs) {
+	(void)S;
+	rval *arg;
+	if (nargs == 1) {
+		arg = (rval*)args[0];
+	} else {
+		arg = rv(RV_TUPLE);
+		for (int i = 0; i < nargs; i++) rv_push(arg, (rval*)args[i]);
+	}
+	return (fb_Value)apply((rval*)fn, arg);
+}
+
+fb_Value fb_error(fb_State *S, const char *fmt, ...) {
+	if (!S) S = &g_fb_state;
+	va_list ap; va_start(ap, fmt);
+	vsnprintf(S->err_msg, sizeof S->err_msg, fmt, ap);
+	va_end(ap);
+	if (S->err_set) longjmp(S->err_jmp, 1);   /* embedding: unwind to boundary */
+	fprintf(stderr, "error: %s\n", S->err_msg);
+	exit(1);                                   /* CLI: no boundary installed  */
+}
+
+/* Dispatch a registered builtin: enforce arity, then call. Args are already
+ * evaluated (splats flattened). */
+static rval *fb_dispatch(const fb_Reg *rg, rval **as, size_t k) {
+	if ((int)k < rg->min || (rg->max >= 0 && (int)k > rg->max))
+		fb_error(&g_fb_state, "%s: expects %d..%d args, got %zu",
+		         rg->name, rg->min, rg->max, k);
+	return (rval *)rg->fn(&g_fb_state, (fb_Value *)as, (int)k);
+}
+
 /* ---- more builtins ---------------------------------------------------- */
 
 static int truthy(rval *v) {
@@ -698,6 +816,132 @@ static rval *do_env(const char *name) {
 	char *v = getenv(name);
 	if (!v) return &RV_UNIT;            /* unset -> () (falsy), so `env(x) || d` works */
 	return rv_str(a_dup(v));
+}
+
+/* ---- lightweight CLI arg helpers (over the `args` list) --------------- */
+
+/* flag(name...) -> Bool: true if any of the given flag names appears in args. */
+static rval *do_flag(rval **a, size_t n) {
+	for (size_t k = 0; k < n; k++) {
+		const char *name = as_cstr(a[k]);
+		for (size_t i = 0; i < g_args->n; i++)
+			if (!strcmp(as_cstr(g_args->items[i]), name)) return rv_bool(1);
+	}
+	return rv_bool(0);
+}
+
+/* opt(name, default) -> String: value of `name v` or `name=v` in args, else
+ * default. A function default is invoked lazily -- only when the option is
+ * absent -- so `opt('-x', _ -> expensive())` never runs expensive() when -x is
+ * supplied. */
+static rval *do_opt(rval *name, rval *deflt) {
+	const char *nm = as_cstr(name);
+	size_t nl = strlen(nm);
+	for (size_t i = 0; i < g_args->n; i++) {
+		const char *cur = as_cstr(g_args->items[i]);
+		if (!strcmp(cur, nm)) {                          /* `name value` */
+			if (i + 1 < g_args->n) return rv_str(a_dup(as_cstr(g_args->items[i + 1])));
+			break;
+		}
+		if (!strncmp(cur, nm, nl) && cur[nl] == '=')     /* `name=value` */
+			return rv_str(a_dup(cur + nl + 1));
+	}
+	return deflt->k == RV_LAMBDA ? apply(deflt, &RV_UNIT) : deflt;
+}
+
+/* positionals() -> List<String>: args that aren't flags (don't start with '-').
+ * Lightweight: does not skip values consumed by opt(); use Parser for that. */
+static rval *do_positionals(void) {
+	rval *l = rv(RV_LIST);
+	for (size_t i = 0; i < g_args->n; i++) {
+		const char *cur = as_cstr(g_args->items[i]);
+		if (cur[0] != '-') rv_push(l, rv_str(a_dup(cur)));
+	}
+	return l;
+}
+
+/* Parser<schema>(argv): drive build.h's args.h with a schema map. Each schema
+ * entry is name -> (type string | spec map). Returns a map of name -> typed
+ * value (with schema/spec defaults applied), plus `rest` = leftover positionals.
+ * `-h`/`--help` is handled by args.h (prints help from the `help` fields). */
+static rval *do_parse(rval *schema, rval *argv_list) {
+	if (!schema || schema->k != RV_MAP) return rv(RV_MAP);
+	size_t ne = schema->n;
+
+	t_arg_rule *rules = a_alloc((ne + 2) * sizeof *rules);
+	memset(rules, 0, (ne + 2) * sizeof *rules);
+
+	for (size_t i = 0; i < ne; i++) {
+		const char *name = schema->keys[i];
+		rval *spec = schema->items[i];
+		rval *sm = (spec && spec->k == RV_MAP) ? spec : NULL;
+		const char *tstr = sm ? "str" : as_cstr(spec);
+		const char *longh = NULL, *shorth = NULL, *help = NULL;
+		if (sm) {
+			rval *v;
+			if ((v = map_get(sm, "type"))->k  != RV_NONE) tstr   = as_cstr(v);
+			if ((v = map_get(sm, "long"))->k  != RV_NONE) longh  = as_cstr(v);
+			if ((v = map_get(sm, "short"))->k != RV_NONE) shorth = as_cstr(v);
+			if ((v = map_get(sm, "help"))->k  != RV_NONE) help   = as_cstr(v);
+		}
+		if (!longh) { char *l = a_alloc(strlen(name) + 3); sprintf(l, "--%s", name); longh = l; }
+		if (!shorth) {
+			/* auto short = -<first letter>, only if unique among names and not -h */
+			int dup = (name[0] == 'h');
+			for (size_t j = 0; j < ne && !dup; j++)
+				if (j != i && schema->keys[j][0] == name[0]) dup = 1;
+			if (!dup) { char *s = a_alloc(3); s[0] = '-'; s[1] = name[0]; s[2] = 0; shorth = s; }
+		}
+		t_arg_type ty = ARG_STRING;
+		if (!strcmp(tstr, "bool")) ty = ARG_BOOL;
+		else if (!strcmp(tstr, "int") || !strcmp(tstr, "integer")) ty = ARG_INTEGER;
+		rules[i].shorthand = shorth;
+		rules[i].longhand  = longh;
+		rules[i].flags     = 0;
+		rules[i].type      = ty;
+		rules[i].help      = help;
+	}
+	rules[ne].longhand = "rest";              /* capture leftover positionals */
+	rules[ne].flags    = ARG_POSITIONAL | ARG_ARRAY;
+	rules[ne].type     = ARG_STR_ARRAY;
+
+	size_t na = (argv_list && is_seq(argv_list)) ? argv_list->n : 0;
+	char **av = a_alloc((na + 1) * sizeof *av);
+	av[0] = "fbuild";
+	for (size_t i = 0; i < na; i++) av[i + 1] = (char *)as_cstr(argv_list->items[i]);
+
+	t_argparser parser = { .rules = rules };
+	if (args_parse(&parser, (int)(na + 1), av) == -2) {  /* -h/--help shown */
+		args_free(&parser);
+		exit(0);
+	}
+
+	rval *res = rv(RV_MAP);
+	for (size_t i = 0; i < ne; i++) {
+		const char *q = rules[i].longhand;
+		rval *val;
+		switch (rules[i].type) {
+		case ARG_BOOL:    val = rv_bool(args_get_bool(&parser, q)); break;
+		case ARG_INTEGER: val = rv_int(args_get_int(&parser, q));   break;
+		default: { const char *s = args_get_str(&parser, q); val = rv_str(a_dup(s ? s : "")); }
+		}
+		if (!args_present(&parser, q) && schema->items[i]->k == RV_MAP) {
+			rval *d = map_get(schema->items[i], "default");
+			/* A function default is invoked lazily -- only here, when the arg
+			 * was not supplied -- so an expensive default (e.g. shelling out)
+			 * never runs when a value is given on the command line. */
+			if (d->k == RV_LAMBDA) d = apply(d, &RV_UNIT);
+			if (d->k != RV_NONE)   val = d;      /* spec default overrides type zero */
+		}
+		map_set(res, a_dup(schema->keys[i]), val);
+	}
+	rval *rest = rv(RV_LIST);
+	t_arg_str_array *arr = args_get_array(&parser, "rest");
+	if (arr) for (size_t i = 0; i < arr->count; i++) rv_push(rest, rv_str(a_dup(arr->items[i])));
+	map_set(res, a_dup("rest"), rest);
+
+	args_free(&parser);
+	return res;
 }
 
 /* run a command via the shell, capture stdout, trim trailing newlines */
@@ -1534,25 +1778,6 @@ static rval *do_json_str(rval *v, int pretty) {
 }
 
 /* map(items): build a Map from a list/tuple of (key, value) pairs. */
-static rval *do_map(rval *items) {
-	rval *m = rv(RV_MAP);
-	if (!is_seq(items)) return m;
-	/* A single entry can't be written as a 1-element list: `map(('k', v))`
-	 * parses as the bare pair ('k', v), not a list holding one pair. Detect that
-	 * (first element is not itself a pair) and treat the whole thing as one entry. */
-	if (items->n >= 2 && items->items[0]
-	    && items->items[0]->k != RV_TUPLE && items->items[0]->k != RV_LIST) {
-		map_set(m, a_dup(as_cstr(items->items[0])), items->items[1]);
-		return m;
-	}
-	for (size_t i = 0; i < items->n; i++) {
-		rval *kv = items->items[i];
-		if (kv && (kv->k == RV_TUPLE || kv->k == RV_LIST) && kv->n >= 2)
-			map_set(m, a_dup(as_cstr(kv->items[0])), kv->items[1]);
-	}
-	return m;
-}
-
 static rval *do_keys(rval *m) {
 	rval *l = rv(RV_LIST);
 	if (m && m->k == RV_MAP)
@@ -1595,16 +1820,22 @@ static int is_builtin(const char *s) {
 		"parent","name","stem","suffix","with_suffix","with_name","path","abs",
 		"print","debug",
 		"json_parse","json_read","json_str","json_pretty","json_write",
-		"map","get","has","keys","values","items",
+		"get","has","keys","values","items",
 		"range","enumerate","slice","index","reverse","sum","min","max","count",
-		"find","to_int","to_str","repeat","chars", NULL };
+		"find","to_int","to_str","repeat","chars",
+		"flag","opt","positionals", NULL };
 	for (size_t i = 0; names[i]; i++) if (!strcmp(s, names[i])) return 1;
-	return 0;
+	return fb_reg_find(s) != NULL;   /* registered host/plugin builtin */
 }
 
 /* apply a unary builtin to one argument (e.g. used in `list |> name`). Builtins
  * that need more than one argument can't be used bare and yield unit. */
 static rval *call_builtin1(const char *n, rval *a) {
+	const fb_Reg *rg = fb_reg_find(n);
+	if (rg && rg->min <= 1 && (rg->max < 0 || rg->max >= 1)) {
+		rval *as[1] = { a };
+		return fb_dispatch(rg, as, 1);
+	}
 	if (!strcmp(n, "glob"))    return do_glob(as_cstr(a));
 	if (!strcmp(n, "env"))     return do_env(as_cstr(a));
 	if (!strcmp(n, "shell"))   return do_shell(a);
@@ -1621,7 +1852,6 @@ static rval *call_builtin1(const char *n, rval *a) {
 	if (!strcmp(n, "json_read"))   return do_json_parse(as_cstr(do_read(a)));
 	if (!strcmp(n, "json_str"))    return do_json_str(a, 0);
 	if (!strcmp(n, "json_pretty")) return do_json_str(a, 1);
-	if (!strcmp(n, "map"))     return do_map(a);
 	if (!strcmp(n, "keys"))    return do_keys(a);
 	if (!strcmp(n, "values"))  return do_values(a);
 	if (!strcmp(n, "items"))   return do_items(a);
@@ -1815,6 +2045,107 @@ static rval *capture_cmd(rval *v) {
 	return rv_str(out);
 }
 
+/* run `pkg-config <args...>` (argv[0] must be "pkg-config"), capturing trimmed
+ * stdout via the library's silent runner; sets *code to the child exit status.
+ * Same capture/free pattern as capture_cmd, but keeps the exit code. */
+static char *pkgconf_run(char **argv, size_t argc, int *code) {
+	t_group_ctx grp = { .opts = { .silent = OPT_TRUE } };
+	t_cmd c = {0};
+	for (size_t i = 0; i < argc; i++) DA_APPEND(c, argv[i]);
+	DA_APPEND(c, NULL);
+
+	build_set_echo_start(0);
+	build_seq_visual(&c, g_env, &grp);
+
+	size_t total = 0;
+	for (size_t i = 0; i < grp.cmd_count; i++) {
+		build__buf *b = (build__buf *)grp.commands[i].output;
+		if (b) total += b->count;
+	}
+	char *out = a_alloc(total + 1);
+	size_t n = 0;
+	int ec = 0;
+	for (size_t i = 0; i < grp.cmd_count; i++) {
+		build__buf *b = (build__buf *)grp.commands[i].output;
+		if (b) {
+			if (b->count) { memcpy(out + n, b->items, b->count); n += b->count; }
+			free(b->items);
+			free(b);
+		}
+		ec = grp.commands[i].exit_code;
+		free(grp.commands[i].repr);
+	}
+	free(grp.commands);
+
+	while (n && (out[n-1]=='\n' || out[n-1]=='\r' || out[n-1]==' ' || out[n-1]=='\t')) n--;
+	out[n] = '\0';
+	if (code) *code = ec;
+	return out;
+}
+
+/* split on runs of whitespace, dropping empty tokens -> List<String> */
+static rval *split_ws(const char *s) {
+	rval *out = rv(RV_LIST);
+	while (*s) {
+		while (*s==' ' || *s=='\t' || *s=='\n' || *s=='\r') s++;
+		if (!*s) break;
+		const char *b = s;
+		while (*s && *s!=' ' && *s!='\t' && *s!='\n' && *s!='\r') s++;
+		rv_push(out, rv_str(a_dupn(b, s - b)));
+	}
+	return out;
+}
+
+/* pkgconfig(name) -> { found, cflags:List, libs:List, version } by shelling out
+ * to pkg-config. `found` is pkg-config --exists succeeding; when absent the
+ * lists are empty and version "". */
+static rval *do_pkgconfig(const char *name) {
+	char *nm = a_dup(name);
+	rval *m = rv(RV_MAP);
+
+	int code = 0;
+	char *ex[] = { "pkg-config", "--exists", nm };
+	(void)pkgconf_run(ex, 3, &code);
+	int found = (code == 0);
+	map_set(m, a_dup("found"), rv_bool(found));
+
+	if (!found) {
+		map_set(m, a_dup("cflags"),  rv(RV_LIST));
+		map_set(m, a_dup("libs"),    rv(RV_LIST));
+		map_set(m, a_dup("version"), rv_str(a_dup("")));
+		return m;
+	}
+
+	char *cf[] = { "pkg-config", "--cflags", nm };
+	char *lf[] = { "pkg-config", "--libs", nm };
+	char *vf[] = { "pkg-config", "--modversion", nm };
+	map_set(m, a_dup("cflags"),  split_ws(pkgconf_run(cf, 3, NULL)));
+	map_set(m, a_dup("libs"),    split_ws(pkgconf_run(lf, 3, NULL)));
+	map_set(m, a_dup("version"), rv_str(pkgconf_run(vf, 3, NULL)));
+	return m;
+}
+
+/* pkgconfig as a registered builtin: the first core builtin ported onto the
+ * extension ABI (fbuild.h), proving the registry path end to end. */
+static fb_Value l_pkgconfig(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	return (fb_Value)do_pkgconfig(fb_tostr(S, a[0]));
+}
+
+/* Register the builtins that live on the extension ABI. Called once at startup;
+ * host programs / plugins register alongside these. */
+static void fb_open_base(fb_State *S) {
+	static const fb_Reg base[] = {
+		{ "pkgconfig", l_pkgconfig, 1, 1, FB_RET_MAP, 0 },
+	};
+	for (size_t i = 0; i < sizeof base / sizeof base[0]; i++)
+		fb_register(S, &base[i]);
+}
+
+/* public init (fbuild.h): register ABI builtins before check/run. Idempotent
+ * (fb_register dedups by name). */
+void fb_init(void) { fb_open_base(&g_fb_state); }
+
 static rval *do_shell(rval *v) {
 	if (!v) return rv_str(a_dup(""));
 	switch (v->k) {
@@ -1948,6 +2279,19 @@ static rval *eval(ast *n, renv *e) {
 			tuple_add(t, n->kids[i], e);
 		return t;
 	}
+
+	case AST_MAPLIT: {                     /* { k: v } and Map<(k,v),...> */
+		rval *m = rv(RV_MAP);
+		for (size_t i = 0; i < n->nkids; i++) {
+			rval *kv = eval(n->kids[i], e);  /* each entry: a 2-tuple */
+			if (kv && (kv->k == RV_TUPLE || kv->k == RV_LIST) && kv->n >= 2)
+				map_set(m, a_dup(as_cstr(kv->items[0])), kv->items[1]);
+		}
+		return m;
+	}
+
+	case AST_PARSER:                       /* bare Parser<schema> -> parse args */
+		return do_parse(eval(n->kids[0], e), g_args);
 
 	case AST_PIPE: {
 		rval *acc = eval(n->kids[0], e);
@@ -2124,6 +2468,11 @@ static rval *eval(ast *n, renv *e) {
 	case AST_CALL: {
 		ast *callee = n->kids[0];
 		size_t na = n->nkids - 1;
+		if (callee->kind == AST_PARSER) {     /* Parser<schema>(argv) */
+			rval *schema = eval(callee->kids[0], e);
+			rval *argv = na >= 1 ? eval(n->kids[1], e) : g_args;
+			return do_parse(schema, argv);
+		}
 		if (callee->kind == AST_ID) {
 			if (tok_is(callee->tok, "glob"))
 				return do_glob(as_cstr(eval(n->kids[1], e)));
@@ -2181,6 +2530,11 @@ static rval *eval(ast *n, renv *e) {
 				rval *r = do_print(as, k, dbg);
 				return r;
 			}
+			if (tok_is(callee->tok, "flag")) {     /* flag(name...) -> Bool */
+				size_t k;
+				rval **as = eval_args(n, e, &k);
+				return do_flag(as, k);
+			}
 			#define A(i) eval(n->kids[i], e)
 			/* json */
 			if (tok_is(callee->tok, "json_parse"))  return do_json_parse(as_cstr(A(1)));
@@ -2188,7 +2542,6 @@ static rval *eval(ast *n, renv *e) {
 			if (tok_is(callee->tok, "json_str"))    return do_json_str(A(1), 0);
 			if (tok_is(callee->tok, "json_pretty")) return do_json_str(A(1), 1);
 			if (tok_is(callee->tok, "json_write"))  return do_write(A(1), do_json_str(A(2), 0));
-			if (tok_is(callee->tok, "map"))    return do_map(A(1));
 			if (tok_is(callee->tok, "get"))    return map_get(A(1), as_cstr(A(2)));
 			if (tok_is(callee->tok, "has"))    return do_has(A(1), A(2));
 			if (tok_is(callee->tok, "keys"))   return do_keys(A(1));
@@ -2199,6 +2552,8 @@ static rval *eval(ast *n, renv *e) {
 			if (tok_is(callee->tok, "time"))   return do_time();
 			if (tok_is(callee->tok, "sleep"))  return do_sleep(A(1));
 			if (tok_is(callee->tok, "config")) return do_config(A(1));
+			if (tok_is(callee->tok, "opt"))    return do_opt(A(1), A(2));
+			if (tok_is(callee->tok, "positionals")) return do_positionals();
 			if (tok_is(callee->tok, "env"))    return do_env(as_cstr(A(1)));
 			if (tok_is(callee->tok, "shell"))  return do_shell(A(1));
 			if (tok_is(callee->tok, "which"))  return do_which(as_cstr(A(1)));
@@ -2290,6 +2645,14 @@ static rval *eval(ast *n, renv *e) {
 				rval *r = do_path(as, k); return r;
 			}
 			#undef A
+
+			/* registered (host/plugin) builtin: consulted after core so it
+			 * can't shadow a core name, before user functions. */
+			const fb_Reg *rg = fb_reg_find_tok(callee->tok);
+			if (rg) {
+				size_t k; rval **as = eval_args(n, e, &k);
+				return fb_dispatch(rg, as, k);
+			}
 		}
 		/* user function: one arg, or a tuple of args (splats flatten) */
 		rval *fn = eval(callee, e);
@@ -2318,9 +2681,17 @@ static rval *eval(ast *n, renv *e) {
 const char *fbuild_version(void) { return build_info.version; }
 
 void run_program(ast *prog, int argc, char **argv) {
-	/* language-level `args` = all CLI args (script is auto-discovered) */
+	fb_init();   /* ensure ABI builtins are registered (idempotent) */
+
+	/* language-level `args` = CLI args forwarded to the script (auto-discovered).
+	 * If a `:::` separator is present, only args after it are forwarded (args
+	 * before it are for fbuild itself); otherwise all args are forwarded. */
+	int start = 1;
+	for (int i = 1; i < argc; i++)
+		if (!strcmp(argv[i], ":::")) { start = i + 1; break; }
+
 	g_args = rv(RV_LIST);
-	for (int i = 1; i < argc; i++) {
+	for (int i = start; i < argc; i++) {
 		rv_push(g_args, rv_str(a_dup(argv[i])));
 		if (!strcmp(argv[i], "--bench")) g_bench = 1;
 	}

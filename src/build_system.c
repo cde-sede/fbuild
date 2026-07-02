@@ -9,6 +9,7 @@
 
 #include "cparser.h"
 #include "ast.h"
+#include "fbuild.h"
 #include "graph.h"
 
 #define die(message, ...) do { fprintf(stderr, "error:" message, ##__VA_ARGS__); exit(1); } while (0)
@@ -553,6 +554,11 @@ static void lex(char *s)
 			     sl, sc, line, col);
 			break;
 
+		case ':':
+			emit(TOK_COLON, s+i, 1,
+			     sl, sc, line, col);
+			break;
+
 		case '*':
 			emit(TOK_STAR, s+i, 1,
 			     sl, sc, line, col);
@@ -660,6 +666,8 @@ const char *ast_name[] = {
 	[AST_EAGER]="eager",
 	[AST_FORCE]="force",
 	[AST_TUPLE]="tuple",
+	[AST_MAPLIT]="maplit",
+	[AST_PARSER]="parser",
 	[AST_LAMBDA]="lambda",
 	[AST_PARAMS]="params",
 	[AST_SEQ]="seq",
@@ -827,6 +835,29 @@ static ast *parse_atom(void) {
 	case TOK_BOOL:  { ast *n = node(AST_BOOL);   n->tok = t; tok_advance(); return n; }
 	case TOK_STRING:{ ast *n = node(AST_STRING); n->tok = t; tok_advance(); return n; }
 	case TOK_PATH:  { ast *n = node(AST_PATH);   n->tok = t; tok_advance(); return n; }
+
+	case TOK_LBRACE: {                   /* map literal: { key: val, ... } */
+		ast *n = node(AST_MAPLIT);
+		tok_advance();                   /* "{" */
+		skip_nl();
+		if (!peek(.kind = TOK_RBRACE)) {
+			do {
+				skip_nl();
+				if (peek(.kind = TOK_RBRACE)) break;   /* trailing comma */
+				ast *entry = node(AST_TUPLE);
+				push(entry, parse_expr_no_tuple());    /* key */
+				skip_nl();
+				expect(.kind = TOK_COLON);
+				skip_nl();
+				push(entry, parse_expr_no_tuple());    /* value */
+				push(n, entry);
+				skip_nl();
+			} while (accept(.kind = TOK_COMMA));
+		}
+		skip_nl();
+		expect(.kind = TOK_RBRACE);
+		return n;
+	}
 
 	case TOK_LPAREN: {                   /* "(" expression ")" */
 		tok_advance();
@@ -996,6 +1027,37 @@ static ast *parse_tuple_ctor(ast *base) {
 	return n;
 }
 
+/* Parser<schema>: schema is a single map expression. The result is applied to
+ * an args list (a following call), or to the program's args when used bare. */
+static ast *parse_parser_ctor(ast *base) {
+	ast *n = node(AST_PARSER);
+	ast_free(base);
+	expect(.kind = TOK_LT);
+	skip_nl();
+	push(n, parse_postfix());   /* schema map (postfix, so '>' isn't a compare) */
+	skip_nl();
+	expect(.kind = TOK_GT);
+	return n;
+}
+
+/* Map<(k,v), (k2,v2), ...>: each element is a (key,value) pair expression.
+ * Reuses AST_MAPLIT, identical eval to the `{ k: v }` literal. */
+static ast *parse_map_ctor(ast *base) {
+	ast *n = node(AST_MAPLIT);
+	ast_free(base);
+	expect(.kind = TOK_LT);
+	if (!peek(.kind = TOK_GT)) {
+		do {
+			skip_nl();
+			if (peek(.kind = TOK_GT)) break;   /* trailing comma */
+			push(n, parse_postfix());
+			skip_nl();
+		} while (accept(.kind = TOK_COMMA));
+	}
+	expect(.kind = TOK_GT);
+	return n;
+}
+
 /* postfix-expression: atom *( call / field / constructor / morphism ) */
 static ast *parse_postfix(void) {
 	ast *base = parse_atom();
@@ -1009,6 +1071,14 @@ static ast *parse_postfix(void) {
 		           base->tok->len == 5 &&
 		           !strncmp(base->tok->string, "Tuple", 5)) {
 			base = parse_tuple_ctor(base);    /* Tuple<...> -> a tuple */
+		} else if (base->kind == AST_ID && peek(.kind = TOK_LT) &&
+		           base->tok->len == 3 &&
+		           !strncmp(base->tok->string, "Map", 3)) {
+			base = parse_map_ctor(base);      /* Map<(k,v), ...> -> a map */
+		} else if (base->kind == AST_ID && peek(.kind = TOK_LT) &&
+		           base->tok->len == 6 &&
+		           !strncmp(base->tok->string, "Parser", 6)) {
+			base = parse_parser_ctor(base);   /* Parser<schema> -> arg parser */
 		} else if (base->kind == AST_ID && constructor_ahead()) {
 			base = parse_constructor(base);
 		} else if (sig_kind() == TOK_MORPH) {     /* path "//" path */
@@ -1535,6 +1605,7 @@ int main(int ac, char **av) {
 
 	ast *prog = parse_program();
 	if (getenv("DUMP_AST")) ast_print(prog, 0);
+	fb_init();                      /* register ABI builtins before type-check */
 	int errs = infer_program(prog);
 	if (errs == 0)                  /* don't run a program with type errors */
 		run_program(prog, ac, av);
