@@ -64,6 +64,7 @@ int main(int argc, char **argv) {
 		nob_cc(&cmd);
 		nob_cmd_append(&cmd, "-shared", "-o", "libfbuild.so");
 		for (size_t i = 0; i < objs.count; i++) nob_cmd_append(&cmd, objs.items[i]);
+		nob_cmd_append(&cmd, "-ldl");
 		if (!nob_cmd_run_sync_and_reset(&cmd)) return 1;
 	}
 	nob_log(NOB_INFO, "built: libfbuild.a / libfbuild.so");
@@ -73,9 +74,9 @@ int main(int argc, char **argv) {
 	{
 		Nob_Cmd cmd = {0};
 		nob_cc(&cmd);
-		nob_cmd_append(&cmd, "-Icgen");
+		nob_cmd_append(&cmd, "-Icgen", "-rdynamic");   /* export fb_* for plugins */
 		nob_cc_output(&cmd, "fbuild");
-		nob_cmd_append(&cmd, "build/main.c.o", "libfbuild.a");
+		nob_cmd_append(&cmd, "build/main.c.o", "libfbuild.a", "-ldl");
 		if (!nob_cmd_run_sync_and_reset(&cmd)) return 1;
 	}
 	nob_log(NOB_INFO, "built: fbuild");

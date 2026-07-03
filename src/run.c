@@ -53,6 +53,7 @@ DECL_DA_FUNCTIONS(int, 256, realloc, free);
 
 #include <setjmp.h>
 #include <stdarg.h>
+#include <dlfcn.h>
 
 #define fatal(...) do { fprintf(stderr, "run: " __VA_ARGS__); \
                         fputc('\n', stderr); exit(1); } while (0)
@@ -2699,14 +2700,17 @@ void fb_set_args(fb_State *S, int argc, char **argv) {
 
 const char *fb_error_msg(fb_State *S) { return S->err_msg; }
 
+static int fb_load_env_plugins(fb_State *S);
+
 int fb_dostring(fb_State *S, const char *src, const char *chunkname) {
 	(void)chunkname;
 	S->err_msg[0] = '\0';
+	fb_init();
+	if (fb_load_env_plugins(S)) return 1;   /* $FBUILD_PLUGINS, before check */
 	p = a_alloc(sizeof *p + sizeof(token) * MAX_TOKENS);
 	lex(a_dup(src));                 /* lexer wants a writable, arena-owned buf */
 	ast *prog = parse_program();
 	if (getenv("DUMP_AST")) ast_print(prog, 0);
-	fb_init();
 
 	/* runtime fb_error() unwinds here (parse-time die() still exits: S1 limit). */
 	if (setjmp(S->err_jmp)) { S->err_set = 0; return 1; }
@@ -2743,4 +2747,49 @@ fb_Value fb_global(fb_State *S, const char *name) {
 	token t = { .string = (char *)name, .len = strlen(name) };
 	rval *v = def_lookup(&t);
 	return (fb_Value)(v ? v : &RV_UNIT);
+}
+
+int fb_load_plugin(fb_State *S, const char *path) {
+	void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+	if (!h) {
+		snprintf(S->err_msg, sizeof S->err_msg, "plugin: %s", dlerror());
+		return 1;
+	}
+	fb_abi_fn abi = (fb_abi_fn)dlsym(h, "fbuild_abi");
+	if (!abi) {
+		snprintf(S->err_msg, sizeof S->err_msg,
+		         "plugin '%s': missing fbuild_abi", path);
+		dlclose(h); return 1;
+	}
+	if (abi() != FBUILD_ABI) {
+		snprintf(S->err_msg, sizeof S->err_msg,
+		         "plugin '%s': ABI %d, expected %d", path, abi(), FBUILD_ABI);
+		dlclose(h); return 1;
+	}
+	fb_open_fn open_fn = (fb_open_fn)dlsym(h, "fbuild_open");
+	if (!open_fn) {
+		snprintf(S->err_msg, sizeof S->err_msg,
+		         "plugin '%s': missing fbuild_open", path);
+		dlclose(h); return 1;
+	}
+	if (open_fn(S) != 0) {
+		if (!S->err_msg[0])
+			snprintf(S->err_msg, sizeof S->err_msg, "plugin '%s': open failed", path);
+		dlclose(h); return 1;
+	}
+	/* keep h open for the process lifetime: registered fns point into it */
+	return 0;
+}
+
+/* Load colon-separated plugin paths from $FBUILD_PLUGINS (once). */
+static int fb_load_env_plugins(fb_State *S) {
+	static int done = 0;
+	if (done) return 0;
+	done = 1;
+	const char *env = getenv("FBUILD_PLUGINS");
+	if (!env || !*env) return 0;
+	char *list = a_dup(env), *save = NULL;
+	for (char *t = strtok_r(list, ":", &save); t; t = strtok_r(NULL, ":", &save))
+		if (fb_load_plugin(S, t)) return 1;
+	return 0;
 }

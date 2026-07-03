@@ -86,6 +86,19 @@ const char *fb_error_msg(fb_State *S);
 /* Read a top-level def by name after a successful run (nil if absent). */
 fb_Value  fb_global(fb_State *S, const char *name);
 
+/* ---- plugins ---------------------------------------------------------- */
+/* dlopen a plugin shared object and let it register builtins. The plugin must
+ * export:
+ *     int fbuild_abi(void);            // return FBUILD_ABI
+ *     int fbuild_open(fb_State *S);    // call fb_register(...); return 0 on ok
+ * Load plugins BEFORE fb_dostring/fb_dofile so the type checker sees the names.
+ * Returns 0 on success, non-zero on error (message in fb_error_msg). */
+int       fb_load_plugin(fb_State *S, const char *path);
+
+/* Signatures a plugin's exported entry points must match. */
+typedef int (*fb_abi_fn)(void);
+typedef int (*fb_open_fn)(fb_State *S);
+
 /* ---- registration ----------------------------------------------------- */
 void          fb_register(fb_State *S, const fb_Reg *reg);
 const fb_Reg *fb_reg_find(const char *name);              /* NUL-terminated */
