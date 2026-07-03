@@ -95,10 +95,8 @@ int main(int ac, char **av) {
 	fb_State *S = fb_new();          /* inits the arena; find_script uses a_dup */
 
 	/* --plugin PATH / --plugin=PATH : dlopen extensions before running, and
-	 * drop them from the args the script sees. */
-	char **fwd = malloc(sizeof(char *) * (size_t)ac);
-	int fc = 0;
-	fwd[fc++] = av[0];
+	 * drop them from the args the script sees (compacted in place, no alloc). */
+	int fc = 1;
 	for (int i = 1; i < ac; i++) {
 		const char *path = NULL;
 		if (!strcmp(av[i], "--plugin")) {
@@ -107,13 +105,13 @@ int main(int ac, char **av) {
 		} else if (!strncmp(av[i], "--plugin=", 9)) {
 			path = av[i] + 9;
 		} else {
-			fwd[fc++] = av[i];
+			av[fc++] = av[i];
 			continue;
 		}
 		if (fb_load_plugin(S, path)) die("%s", fb_error_msg(S));
 	}
 
-	fb_set_args(S, fc, fwd);
+	fb_set_args(S, fc, av);
 	int rc = fb_dofile(S, find_script());
 	if (rc && fb_error_msg(S)[0])
 		fprintf(stderr, "error: %s\n", fb_error_msg(S));

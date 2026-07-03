@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.11"
+#define FBUILD_VERSION "0.1.12"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -2920,6 +2920,7 @@ fb_State *fb_new(void) {
 }
 
 void fb_close(fb_State *S) {
+	build_ui_cleanup();                    /* release the shared draw buffer */
 	arena_free(S->arena);
 	if (g_active == S) g_active = NULL;   /* live globals now dangle until next activate */
 	free(S);
