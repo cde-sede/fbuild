@@ -402,24 +402,6 @@ static obj_type *infer_call(ast *node, scope *sc) {
 			break;
 		}
 
-		/* registered (host/plugin) builtin: arity + return type from the
-		 * shared registry (fbuild.h), so extensions type-check like core. */
-		const fb_Reg *rg = fb_reg_findn(callee->tok->string, callee->tok->len);
-		if (rg) {
-			if ((int)na < rg->min || (rg->max >= 0 && (int)na > rg->max)) {
-				if (rg->max < 0)
-					type_err(callee->tok, "%s expects at least %d argument%s, got %zu",
-					         rg->name, rg->min, rg->min == 1 ? "" : "s", na);
-				else if (rg->min == rg->max)
-					type_err(callee->tok, "%s expects %d argument%s, got %zu",
-					         rg->name, rg->min, rg->min == 1 ? "" : "s", na);
-				else
-					type_err(callee->tok, "%s expects %d to %d arguments, got %zu",
-					         rg->name, rg->min, rg->max, na);
-			}
-			return fb_ret_type(rg->ret);
-		}
-
 		/* glob(pattern) -> List<File> */
 		if (tok_is(callee->tok, "glob"))
 			return t_list(t_file());
@@ -550,6 +532,25 @@ static obj_type *infer_call(ast *node, scope *sc) {
 		if (tok_is(callee->tok, "with_suffix") || tok_is(callee->tok, "with_name")
 		 || tok_is(callee->tok, "path") || tok_is(callee->tok, "abs"))
 			return t_file();
+
+		/* registered (host/plugin) builtin not handled above: arity + return
+		 * type from the shared registry (fbuild.h). Consulted last so core
+		 * names keep their precise inference. */
+		const fb_Reg *rg = fb_reg_findn(callee->tok->string, callee->tok->len);
+		if (rg) {
+			if ((int)na < rg->min || (rg->max >= 0 && (int)na > rg->max)) {
+				if (rg->max < 0)
+					type_err(callee->tok, "%s expects at least %d argument%s, got %zu",
+					         rg->name, rg->min, rg->min == 1 ? "" : "s", na);
+				else if (rg->min == rg->max)
+					type_err(callee->tok, "%s expects %d argument%s, got %zu",
+					         rg->name, rg->min, rg->min == 1 ? "" : "s", na);
+				else
+					type_err(callee->tok, "%s expects %d to %d arguments, got %zu",
+					         rg->name, rg->min, rg->max, na);
+			}
+			return fb_ret_type(rg->ret);
+		}
 	}
 
 	/* otherwise: applying a user function value */

@@ -104,6 +104,7 @@ extern size_t         cur;
 extern const char    *kind_name[];
 
 void   lexer(char *restrict s);
+void   lex(char *s);          /* the funcbuild lexer (build_system.c) */
 void   emit(int kind, char *str, size_t len, int sl, int sc, int el, int ec);
 
 int    _match(struct obj want, size_t idx);

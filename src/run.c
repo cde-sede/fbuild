@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.7"
+#define FBUILD_VERSION "0.1.8"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -633,9 +633,11 @@ static rval *apply(rval *fn, rval *arg) {
  * ========================================================================== */
 
 struct fb_State {
-	jmp_buf err_jmp;      /* protected-call boundary (unused by the CLI) */
+	jmp_buf err_jmp;      /* protected-call boundary                     */
 	int     err_set;      /* 1 when a boundary is installed              */
 	char    err_msg[512];
+	int     argc;         /* args handed to the script (fb_set_args)     */
+	char  **argv;
 };
 
 static struct fb_State g_fb_state;
@@ -1836,52 +1838,7 @@ static rval *call_builtin1(const char *n, rval *a) {
 		rval *as[1] = { a };
 		return fb_dispatch(rg, as, 1);
 	}
-	if (!strcmp(n, "glob"))    return do_glob(as_cstr(a));
-	if (!strcmp(n, "env"))     return do_env(as_cstr(a));
-	if (!strcmp(n, "shell"))   return do_shell(a);
-	if (!strcmp(n, "which"))   return do_which(as_cstr(a));
-	if (!strcmp(n, "exists"))  return do_exists(a);
-	if (!strcmp(n, "mkdir"))   return do_mkdir(a);
-	if (!strcmp(n, "read"))    return do_read(a);
-	if (!strcmp(n, "remove"))  return do_remove(a);
-	if (!strcmp(n, "touch"))   return do_touch(a);
-	if (!strcmp(n, "is_dir"))  return do_is_dir(a);
-	if (!strcmp(n, "is_file")) return do_is_file(a);
-	if (!strcmp(n, "flatten")) return do_flatten(a);
-	if (!strcmp(n, "json_parse"))  return do_json_parse(as_cstr(a));
-	if (!strcmp(n, "json_read"))   return do_json_parse(as_cstr(do_read(a)));
-	if (!strcmp(n, "json_str"))    return do_json_str(a, 0);
-	if (!strcmp(n, "json_pretty")) return do_json_str(a, 1);
-	if (!strcmp(n, "keys"))    return do_keys(a);
-	if (!strcmp(n, "values"))  return do_values(a);
-	if (!strcmp(n, "items"))   return do_items(a);
-	if (!strcmp(n, "range"))   return do_range(0, a->i);
-	if (!strcmp(n, "enumerate")) return do_enumerate(a);
-	if (!strcmp(n, "reverse")) return do_reverse(a);
-	if (!strcmp(n, "sum"))     return do_sum(&a, 1);
-	if (!strcmp(n, "min"))     return do_min(&a, 1);
-	if (!strcmp(n, "max"))     return do_max(&a, 1);
-	if (!strcmp(n, "to_int"))  return do_to_int(a);
-	if (!strcmp(n, "to_str"))  return do_to_str(a);
-	if (!strcmp(n, "chars"))   return do_chars(as_cstr(a));
-	if (!strcmp(n, "length"))  return do_length(a);
-	if (!strcmp(n, "first"))   return do_first(a);
-	if (!strcmp(n, "last"))    return do_last(a);
-	if (!strcmp(n, "sort"))    return do_sort(a);
-	if (!strcmp(n, "unique"))  return do_unique(a);
-	if (!strcmp(n, "parent"))  return rv_str(path_dir(pstr(a)));
-	if (!strcmp(n, "name"))    return rv_str(path_base(pstr(a)));
-	if (!strcmp(n, "stem"))    return rv_str(path_stem(pstr(a)));
-	if (!strcmp(n, "suffix"))  return rv_str(path_suffix(pstr(a)));
-	if (!strcmp(n, "upper"))   return do_upper(a);
-	if (!strcmp(n, "lower"))   return do_lower(a);
-	if (!strcmp(n, "trim"))    return do_trim(a);
-	if (!strcmp(n, "capitalize")) return do_capitalize(a);
-	if (!strcmp(n, "title"))   return do_title(a);
-	if (!strcmp(n, "lstrip"))  return do_lstrip(a);
-	if (!strcmp(n, "rstrip"))  return do_rstrip(a);
-	if (!strcmp(n, "abs"))     return do_abs(a);
-	return &RV_UNIT;
+	return &RV_UNIT;   /* not a builtin, or one that can't be applied unary */
 }
 
 /* ---- command collection + execution ----------------------------------- */
@@ -2124,27 +2081,6 @@ static rval *do_pkgconfig(const char *name) {
 	map_set(m, a_dup("version"), rv_str(pkgconf_run(vf, 3, NULL)));
 	return m;
 }
-
-/* pkgconfig as a registered builtin: the first core builtin ported onto the
- * extension ABI (fbuild.h), proving the registry path end to end. */
-static fb_Value l_pkgconfig(fb_State *S, fb_Value *a, int n) {
-	(void)n;
-	return (fb_Value)do_pkgconfig(fb_tostr(S, a[0]));
-}
-
-/* Register the builtins that live on the extension ABI. Called once at startup;
- * host programs / plugins register alongside these. */
-static void fb_open_base(fb_State *S) {
-	static const fb_Reg base[] = {
-		{ "pkgconfig", l_pkgconfig, 1, 1, FB_RET_MAP, 0 },
-	};
-	for (size_t i = 0; i < sizeof base / sizeof base[0]; i++)
-		fb_register(S, &base[i]);
-}
-
-/* public init (fbuild.h): register ABI builtins before check/run. Idempotent
- * (fb_register dedups by name). */
-void fb_init(void) { fb_open_base(&g_fb_state); }
 
 static rval *do_shell(rval *v) {
 	if (!v) return rv_str(a_dup(""));
@@ -2474,40 +2410,10 @@ static rval *eval(ast *n, renv *e) {
 			return do_parse(schema, argv);
 		}
 		if (callee->kind == AST_ID) {
-			if (tok_is(callee->tok, "glob"))
-				return do_glob(as_cstr(eval(n->kids[1], e)));
-			if (tok_is(callee->tok, "zip")) {
-				size_t k; rval **as = eval_args(n, e, &k);
-				return do_zip(as, k);
-			}
-			if (tok_is(callee->tok, "subst"))
-				return rv_str(subst_a(as_cstr(eval(n->kids[2], e)),
-				                      as_cstr(eval(n->kids[3], e)),
-				                      as_cstr(eval(n->kids[1], e))));
-			if (tok_is(callee->tok, "stale")) {
-				size_t k;
-				rval **as = eval_args(n, e, &k);   /* flattens ...splat */
-				rval *r = do_stale(as, k);
-				return r;
-			}
-			if (tok_is(callee->tok, "run")) {
-				rval *target;
-				if (na == 1) {
-					target = eval(n->kids[1], e);    /* one target */
-				} else {                             /* many -> parallel */
-					target = rv(RV_TUPLE);
-					for (size_t i = 1; i < n->nkids; i++)
-						rv_push(target, eval(n->kids[i], e));
-				}
-				int ran = has_cmd(target);           /* did it carry any work? */
-				run_tree(target);
-				return rv_bool(ran);                 /* true=ran, false=nothing */
-			}
+			/* bench(label, expr): the one builtin that must stay lazy -- it
+			 * times evaluation of its (unevaluated) expr, so it cannot go
+			 * through the eager registry ABI. Everything else is registered. */
 			if (tok_is(callee->tok, "bench")) {
-				/* bench(label, expr): time the *unevaluated* expr (so a run/seq
-				 * inside is actually executed between the two clock reads) and
-				 * print the elapsed wall time -- only when --bench is set.
-				 * Returns expr's value so it stays transparent in a pipeline. */
 				const char *label = as_cstr(eval(n->kids[1], e));
 				struct timespec t0, t1;
 				clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -2523,131 +2429,9 @@ static rval *eval(ast *n, renv *e) {
 				}
 				return r;
 			}
-			if (tok_is(callee->tok, "print") || tok_is(callee->tok, "debug")) {
-				int dbg = tok_is(callee->tok, "debug");
-				size_t k;
-				rval **as = eval_args(n, e, &k);   /* flattens ...splat */
-				rval *r = do_print(as, k, dbg);
-				return r;
-			}
-			if (tok_is(callee->tok, "flag")) {     /* flag(name...) -> Bool */
-				size_t k;
-				rval **as = eval_args(n, e, &k);
-				return do_flag(as, k);
-			}
-			#define A(i) eval(n->kids[i], e)
-			/* json */
-			if (tok_is(callee->tok, "json_parse"))  return do_json_parse(as_cstr(A(1)));
-			if (tok_is(callee->tok, "json_read"))   return do_json_parse(as_cstr(do_read(A(1))));
-			if (tok_is(callee->tok, "json_str"))    return do_json_str(A(1), 0);
-			if (tok_is(callee->tok, "json_pretty")) return do_json_str(A(1), 1);
-			if (tok_is(callee->tok, "json_write"))  return do_write(A(1), do_json_str(A(2), 0));
-			if (tok_is(callee->tok, "get"))    return map_get(A(1), as_cstr(A(2)));
-			if (tok_is(callee->tok, "has"))    return do_has(A(1), A(2));
-			if (tok_is(callee->tok, "keys"))   return do_keys(A(1));
-			if (tok_is(callee->tok, "values")) return do_values(A(1));
-			if (tok_is(callee->tok, "items"))  return do_items(A(1));
-			/* time / config / process */
-			if (tok_is(callee->tok, "clock"))  return do_clock();
-			if (tok_is(callee->tok, "time"))   return do_time();
-			if (tok_is(callee->tok, "sleep"))  return do_sleep(A(1));
-			if (tok_is(callee->tok, "config")) return do_config(A(1));
-			if (tok_is(callee->tok, "opt"))    return do_opt(A(1), A(2));
-			if (tok_is(callee->tok, "positionals")) return do_positionals();
-			if (tok_is(callee->tok, "env"))    return do_env(as_cstr(A(1)));
-			if (tok_is(callee->tok, "shell"))  return do_shell(A(1));
-			if (tok_is(callee->tok, "which"))  return do_which(as_cstr(A(1)));
-			/* filesystem */
-			if (tok_is(callee->tok, "exists")) return do_exists(A(1));
-			if (tok_is(callee->tok, "mkdir"))  return do_mkdir(A(1));
-			if (tok_is(callee->tok, "read"))   return do_read(A(1));
-			if (tok_is(callee->tok, "write"))  return do_write(A(1), A(2));
-			if (tok_is(callee->tok, "move"))    return do_move(A(1), A(2));
-			if (tok_is(callee->tok, "copy"))    return do_copy(A(1), A(2));
-			if (tok_is(callee->tok, "symlink")) return do_symlink(A(1), A(2));
-			if (tok_is(callee->tok, "remove"))  return do_remove(A(1));
-			if (tok_is(callee->tok, "touch"))   return do_touch(A(1));
-			if (tok_is(callee->tok, "is_dir"))  return do_is_dir(A(1));
-			if (tok_is(callee->tok, "is_file")) return do_is_file(A(1));
-			/* lists */
-			if (tok_is(callee->tok, "filter")) return do_filter(A(1), A(2));
-			if (tok_is(callee->tok, "contains")) return do_contains(A(1), A(2));
-			if (tok_is(callee->tok, "flatten"))return do_flatten(A(1));
-			if (tok_is(callee->tok, "fold"))   return do_fold(A(1), A(2), A(3));
-			if (tok_is(callee->tok, "length")) return do_length(A(1));
-			if (tok_is(callee->tok, "first"))  return do_first(A(1));
-			if (tok_is(callee->tok, "last"))   return do_last(A(1));
-			if (tok_is(callee->tok, "take"))   return do_take(A(1), A(2));
-			if (tok_is(callee->tok, "drop"))   return do_drop(A(1), A(2));
-			if (tok_is(callee->tok, "sort"))   return do_sort(A(1));
-			if (tok_is(callee->tok, "unique")) return do_unique(A(1));
-			if (tok_is(callee->tok, "range"))
-				return na == 1 ? do_range(0, A(1)->i) : do_range(A(1)->i, A(2)->i);
-			if (tok_is(callee->tok, "enumerate")) return do_enumerate(A(1));
-			if (tok_is(callee->tok, "slice"))  return do_slice(A(1), A(2)->i, A(3)->i);
-			if (tok_is(callee->tok, "index"))
-				return do_index(A(1), A(2), na >= 3 ? A(3) : NULL);
-			if (tok_is(callee->tok, "reverse"))return do_reverse(A(1));
-			if (tok_is(callee->tok, "sum") || tok_is(callee->tok, "min")
-			 || tok_is(callee->tok, "max")) {
-				size_t k; rval **as = eval_args(n, e, &k);
-				return tok_is(callee->tok, "sum") ? do_sum(as, k)
-				     : tok_is(callee->tok, "min") ? do_min(as, k)
-				     :                              do_max(as, k);
-			}
-			if (tok_is(callee->tok, "count"))  return do_count(A(1), A(2));
-			if (tok_is(callee->tok, "concat")) {
-				size_t k; rval **as = eval_args(n, e, &k);
-				rval *r = do_concat(as, k); return r;
-			}
-			/* strings */
-			if (tok_is(callee->tok, "join"))    return do_join(A(1), as_cstr(A(2)));
-			if (tok_is(callee->tok, "split"))   return do_split(as_cstr(A(1)), as_cstr(A(2)));
-			if (tok_is(callee->tok, "replace")) return do_replace(as_cstr(A(1)), as_cstr(A(2)), as_cstr(A(3)));
-			if (tok_is(callee->tok, "upper"))   return do_upper(A(1));
-			if (tok_is(callee->tok, "lower"))   return do_lower(A(1));
-			if (tok_is(callee->tok, "trim"))    return do_trim(A(1));
-			if (tok_is(callee->tok, "capitalize")) return do_capitalize(A(1));
-			if (tok_is(callee->tok, "title"))   return do_title(A(1));
-			if (tok_is(callee->tok, "lstrip"))  return do_lstrip(A(1));
-			if (tok_is(callee->tok, "rstrip"))  return do_rstrip(A(1));
-			if (tok_is(callee->tok, "strip_prefix")) return do_strip_prefix(A(1), A(2));
-			if (tok_is(callee->tok, "strip_suffix")) return do_strip_suffix(A(1), A(2));
-			if (tok_is(callee->tok, "pad_left") || tok_is(callee->tok, "pad_right")
-			 || tok_is(callee->tok, "center")) {
-				char fill = ' ';
-				if (na >= 3) { const char *f = as_cstr(A(3)); if (f[0]) fill = f[0]; }
-				int side = tok_is(callee->tok, "pad_left") ? -1
-				         : tok_is(callee->tok, "pad_right") ? 1 : 0;
-				return pad_to(as_cstr(A(1)), A(2)->i, fill, side);
-			}
-			if (tok_is(callee->tok, "starts_with")) return do_starts_with(A(1), A(2));
-			if (tok_is(callee->tok, "ends_with"))   return do_ends_with(A(1), A(2));
-			if (tok_is(callee->tok, "find"))    return do_find(as_cstr(A(1)), as_cstr(A(2)));
-			if (tok_is(callee->tok, "to_int"))  return do_to_int(A(1));
-			if (tok_is(callee->tok, "to_str"))  return do_to_str(A(1));
-			if (tok_is(callee->tok, "repeat"))  return do_repeat(as_cstr(A(1)), A(2)->i);
-			if (tok_is(callee->tok, "chars"))   return do_chars(as_cstr(A(1)));
-			if (tok_is(callee->tok, "cat")) {
-				size_t k; rval **as = eval_args(n, e, &k);
-				rval *r = do_cat(as, k); return r;
-			}
-			/* paths */
-			if (tok_is(callee->tok, "parent"))  return rv_str(path_dir(pstr(A(1))));
-			if (tok_is(callee->tok, "name"))    return rv_str(path_base(pstr(A(1))));
-			if (tok_is(callee->tok, "stem"))    return rv_str(path_stem(pstr(A(1))));
-			if (tok_is(callee->tok, "suffix"))  return rv_str(path_suffix(pstr(A(1))));
-			if (tok_is(callee->tok, "with_suffix")) return do_with_suffix(A(1), as_cstr(A(2)));
-			if (tok_is(callee->tok, "with_name"))   return do_with_name(A(1), as_cstr(A(2)));
-			if (tok_is(callee->tok, "abs"))     return do_abs(A(1));
-			if (tok_is(callee->tok, "path")) {
-				size_t k; rval **as = eval_args(n, e, &k);
-				rval *r = do_path(as, k); return r;
-			}
-			#undef A
 
-			/* registered (host/plugin) builtin: consulted after core so it
-			 * can't shadow a core name, before user functions. */
+			/* registered builtin (core + host/plugin): evaluate args (splats
+			 * flatten) and dispatch through the extension ABI (fbuild.h). */
 			const fb_Reg *rg = fb_reg_find_tok(callee->tok);
 			if (rg) {
 				size_t k; rval **as = eval_args(n, e, &k);
@@ -2674,6 +2458,172 @@ static rval *eval(ast *n, renv *e) {
 	}
 	return &RV_UNIT;
 }
+
+/* ============================================================================
+ * Builtin registration: every core builtin is exposed through the extension
+ * ABI (fbuild.h). Thin wrappers marshal already-evaluated fb_Value args to the
+ * existing do_* implementations; the registry table below is the single source
+ * of truth for names, arity, and (for the checker, on extern names) return type.
+ * `bench` is the sole exception -- it must stay lazy and lives in eval().
+ * ========================================================================== */
+
+#define AR(i) ((rval *)a[i])
+#define AC(i) as_cstr((rval *)a[i])
+#define AI(k) (((rval *)a[k])->i)
+#define RV(x) ((fb_Value)(x))
+
+/* generators for the common wrapper shapes */
+#define WV1(w,fn) static fb_Value w(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(fn(AR(0)));}
+#define WV2(w,fn) static fb_Value w(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(fn(AR(0),AR(1)));}
+#define WC1(w,fn) static fb_Value w(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(fn(AC(0)));}
+#define WC2(w,fn) static fb_Value w(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(fn(AC(0),AC(1)));}
+#define WVN(w,fn) static fb_Value w(fb_State*S,fb_Value*a,int n){(void)S;return RV(fn((rval**)a,(size_t)n));}
+
+WC1(w_glob, do_glob)          WVN(w_zip, do_zip)          WVN(w_stale, do_stale)
+WC1(w_env, do_env)            WV1(w_shell, do_shell)      WC1(w_which, do_which)
+WV1(w_exists, do_exists)      WV1(w_mkdir, do_mkdir)      WV1(w_read, do_read)
+WV2(w_write, do_write)        WV2(w_move, do_move)        WV2(w_copy, do_copy)
+WV2(w_symlink, do_symlink)    WV1(w_remove, do_remove)    WV1(w_touch, do_touch)
+WV1(w_is_dir, do_is_dir)      WV1(w_is_file, do_is_file)
+WV2(w_filter, do_filter)      WV2(w_contains, do_contains)WV1(w_flatten, do_flatten)
+WV1(w_length, do_length)      WV1(w_first, do_first)      WV1(w_last, do_last)
+WV2(w_take, do_take)          WV2(w_drop, do_drop)        WV1(w_sort, do_sort)
+WV1(w_unique, do_unique)      WV1(w_enumerate, do_enumerate) WV1(w_reverse, do_reverse)
+WV2(w_count, do_count)        WVN(w_concat, do_concat)    WVN(w_cat, do_cat)
+WC2(w_split, do_split)        WV1(w_upper, do_upper)      WV1(w_lower, do_lower)
+WV1(w_trim, do_trim)          WV1(w_capitalize, do_capitalize) WV1(w_title, do_title)
+WV1(w_lstrip, do_lstrip)      WV1(w_rstrip, do_rstrip)
+WV2(w_strip_prefix, do_strip_prefix) WV2(w_strip_suffix, do_strip_suffix)
+WV2(w_starts_with, do_starts_with)   WV2(w_ends_with, do_ends_with)
+WC2(w_find, do_find)          WV1(w_to_int, do_to_int)    WV1(w_to_str, do_to_str)
+WC1(w_chars, do_chars)        WV1(w_abs, do_abs)          WVN(w_path, do_path)
+WV2(w_has, do_has)            WV1(w_keys, do_keys)        WV1(w_values, do_values)
+WV1(w_items, do_items)        WV1(w_sleep, do_sleep)      WV1(w_config, do_config)
+WV2(w_opt, do_opt)            WVN(w_sum, do_sum)          WVN(w_min, do_min)
+WVN(w_max, do_max)
+
+/* wrappers with argument reshaping / mixed types */
+static fb_Value w_subst(fb_State*S,fb_Value*a,int n){(void)S;(void)n;
+	return RV(rv_str(subst_a(AC(1), AC(2), AC(0)))); }        /* subst(s,from,to) */
+static fb_Value w_join(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_join(AR(0), AC(1)));}
+static fb_Value w_replace(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_replace(AC(0),AC(1),AC(2)));}
+static fb_Value w_repeat(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_repeat(AC(0), AI(1)));}
+static fb_Value w_with_suffix(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_with_suffix(AR(0), AC(1)));}
+static fb_Value w_with_name(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_with_name(AR(0), AC(1)));}
+static fb_Value w_parent(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(rv_str(path_dir(pstr(AR(0)))));}
+static fb_Value w_name(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(rv_str(path_base(pstr(AR(0)))));}
+static fb_Value w_stem(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(rv_str(path_stem(pstr(AR(0)))));}
+static fb_Value w_suffix(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(rv_str(path_suffix(pstr(AR(0)))));}
+static fb_Value w_fold(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_fold(AR(0),AR(1),AR(2)));}
+static fb_Value w_range(fb_State*S,fb_Value*a,int n){(void)S;
+	return RV(n == 1 ? do_range(0, AI(0)) : do_range(AI(0), AI(1))); }
+static fb_Value w_slice(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_slice(AR(0), AI(1), AI(2)));}
+static fb_Value w_index(fb_State*S,fb_Value*a,int n){(void)S;return RV(do_index(AR(0), AR(1), n >= 3 ? AR(2) : NULL));}
+static fb_Value w_get(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(map_get(AR(0), AC(1)));}
+static fb_Value w_clock(fb_State*S,fb_Value*a,int n){(void)S;(void)a;(void)n;return RV(do_clock());}
+static fb_Value w_time(fb_State*S,fb_Value*a,int n){(void)S;(void)a;(void)n;return RV(do_time());}
+static fb_Value w_positionals(fb_State*S,fb_Value*a,int n){(void)S;(void)a;(void)n;return RV(do_positionals());}
+static fb_Value w_json_parse(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_json_parse(AC(0)));}
+static fb_Value w_json_read(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_json_parse(as_cstr(do_read(AR(0)))));}
+static fb_Value w_json_str(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_json_str(AR(0), 0));}
+static fb_Value w_json_pretty(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_json_str(AR(0), 1));}
+static fb_Value w_json_write(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_write(AR(0), do_json_str(AR(1), 0)));}
+static fb_Value w_print(fb_State*S,fb_Value*a,int n){(void)S;return RV(do_print((rval**)a,(size_t)n,0));}
+static fb_Value w_debug(fb_State*S,fb_Value*a,int n){(void)S;return RV(do_print((rval**)a,(size_t)n,1));}
+static fb_Value w_flag(fb_State*S,fb_Value*a,int n){(void)S;return RV(do_flag((rval**)a,(size_t)n));}
+static fb_Value l_pkgconfig(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_pkgconfig(AC(0)));}
+static fb_Value w_pad(fb_State*S,fb_Value*a,int n,int side){(void)S;
+	char fill = ' ';
+	if (n >= 3) { const char *f = AC(2); if (f[0]) fill = f[0]; }
+	return RV(pad_to(AC(0), AI(1), fill, side)); }
+static fb_Value w_pad_left (fb_State*S,fb_Value*a,int n){return w_pad(S,a,n,-1);}
+static fb_Value w_pad_right(fb_State*S,fb_Value*a,int n){return w_pad(S,a,n, 1);}
+static fb_Value w_center   (fb_State*S,fb_Value*a,int n){return w_pad(S,a,n, 0);}
+/* run(targets...): build a target (single, or a tuple = parallel), run it,
+ * return whether it carried any work. Eager: args are evaluated commands/seqs. */
+static fb_Value w_run(fb_State*S,fb_Value*a,int n){(void)S;
+	rval *target;
+	if (n == 1) target = AR(0);
+	else { target = rv(RV_TUPLE); for (int i = 0; i < n; i++) rv_push(target, AR(i)); }
+	int ran = has_cmd(target);
+	run_tree(target);
+	return RV(rv_bool(ran)); }
+
+/* Register the interpreter's ABI builtins. Idempotent (fb_register dedups). */
+static void fb_open_base(fb_State *S) {
+	static const fb_Reg base[] = {
+		/* io / process */
+		{"env",w_env,1,1,FB_RET_STR,0}, {"shell",w_shell,1,1,FB_RET_ANY,0},
+		{"which",w_which,1,1,FB_RET_FILE,0}, {"pkgconfig",l_pkgconfig,1,1,FB_RET_MAP,0},
+		{"run",w_run,1,-1,FB_RET_BOOL,0}, {"print",w_print,0,-1,FB_RET_UNIT,0},
+		{"debug",w_debug,0,-1,FB_RET_UNIT,0}, {"config",w_config,1,1,FB_RET_UNIT,0},
+		/* time */
+		{"clock",w_clock,0,0,FB_RET_INT,0}, {"time",w_time,0,0,FB_RET_INT,0},
+		{"sleep",w_sleep,1,1,FB_RET_UNIT,0},
+		/* filesystem */
+		{"glob",w_glob,1,1,FB_RET_LIST,0}, {"exists",w_exists,1,1,FB_RET_BOOL,0},
+		{"mkdir",w_mkdir,1,1,FB_RET_FILE,0}, {"read",w_read,1,1,FB_RET_STR,0},
+		{"write",w_write,2,2,FB_RET_FILE,0}, {"move",w_move,2,2,FB_RET_FILE,0},
+		{"copy",w_copy,2,2,FB_RET_FILE,0}, {"symlink",w_symlink,2,2,FB_RET_FILE,0},
+		{"remove",w_remove,1,1,FB_RET_BOOL,0}, {"touch",w_touch,1,1,FB_RET_FILE,0},
+		{"is_dir",w_is_dir,1,1,FB_RET_BOOL,0}, {"is_file",w_is_file,1,1,FB_RET_BOOL,0},
+		{"stale",w_stale,1,-1,FB_RET_BOOL,0},
+		/* list */
+		{"zip",w_zip,2,-1,FB_RET_LIST,0}, {"filter",w_filter,2,2,FB_RET_LIST,0},
+		{"contains",w_contains,2,2,FB_RET_BOOL,0}, {"flatten",w_flatten,1,1,FB_RET_LIST,0},
+		{"concat",w_concat,0,-1,FB_RET_LIST,0}, {"fold",w_fold,3,3,FB_RET_ANY,0},
+		{"length",w_length,1,1,FB_RET_INT,0}, {"first",w_first,1,1,FB_RET_ANY,0},
+		{"last",w_last,1,1,FB_RET_ANY,0}, {"take",w_take,2,2,FB_RET_LIST,0},
+		{"drop",w_drop,2,2,FB_RET_LIST,0}, {"sort",w_sort,1,1,FB_RET_LIST,0},
+		{"unique",w_unique,1,1,FB_RET_LIST,0}, {"range",w_range,1,2,FB_RET_LIST,0},
+		{"enumerate",w_enumerate,1,1,FB_RET_LIST,0}, {"slice",w_slice,3,3,FB_RET_LIST,0},
+		{"index",w_index,2,3,FB_RET_INT,0}, {"reverse",w_reverse,1,1,FB_RET_LIST,0},
+		{"sum",w_sum,1,-1,FB_RET_INT,0}, {"min",w_min,1,-1,FB_RET_INT,0},
+		{"max",w_max,1,-1,FB_RET_INT,0}, {"count",w_count,2,2,FB_RET_INT,0},
+		/* string */
+		{"cat",w_cat,0,-1,FB_RET_STR,0}, {"join",w_join,2,2,FB_RET_STR,0},
+		{"split",w_split,2,2,FB_RET_LIST,0}, {"replace",w_replace,3,3,FB_RET_STR,0},
+		{"subst",w_subst,3,3,FB_RET_STR,0}, {"upper",w_upper,1,1,FB_RET_STR,0},
+		{"lower",w_lower,1,1,FB_RET_STR,0}, {"trim",w_trim,1,1,FB_RET_STR,0},
+		{"capitalize",w_capitalize,1,1,FB_RET_STR,0}, {"title",w_title,1,1,FB_RET_STR,0},
+		{"lstrip",w_lstrip,1,1,FB_RET_STR,0}, {"rstrip",w_rstrip,1,1,FB_RET_STR,0},
+		{"strip_prefix",w_strip_prefix,2,2,FB_RET_STR,0}, {"strip_suffix",w_strip_suffix,2,2,FB_RET_STR,0},
+		{"pad_left",w_pad_left,2,3,FB_RET_STR,0}, {"pad_right",w_pad_right,2,3,FB_RET_STR,0},
+		{"center",w_center,2,3,FB_RET_STR,0}, {"starts_with",w_starts_with,2,2,FB_RET_BOOL,0},
+		{"ends_with",w_ends_with,2,2,FB_RET_BOOL,0}, {"find",w_find,2,2,FB_RET_INT,0},
+		{"repeat",w_repeat,2,2,FB_RET_STR,0}, {"chars",w_chars,1,1,FB_RET_LIST,0},
+		{"to_int",w_to_int,1,1,FB_RET_INT,0}, {"to_str",w_to_str,1,1,FB_RET_STR,0},
+		/* path */
+		{"parent",w_parent,1,1,FB_RET_STR,0}, {"name",w_name,1,1,FB_RET_STR,0},
+		{"stem",w_stem,1,1,FB_RET_STR,0}, {"suffix",w_suffix,1,1,FB_RET_STR,0},
+		{"with_suffix",w_with_suffix,2,2,FB_RET_FILE,0}, {"with_name",w_with_name,2,2,FB_RET_FILE,0},
+		{"path",w_path,0,-1,FB_RET_FILE,0}, {"abs",w_abs,1,1,FB_RET_FILE,0},
+		/* json / map */
+		{"json_parse",w_json_parse,1,1,FB_RET_ANY,0}, {"json_read",w_json_read,1,1,FB_RET_ANY,0},
+		{"json_str",w_json_str,1,1,FB_RET_STR,0}, {"json_pretty",w_json_pretty,1,1,FB_RET_STR,0},
+		{"json_write",w_json_write,2,2,FB_RET_FILE,0}, {"get",w_get,2,2,FB_RET_ANY,0},
+		{"has",w_has,2,2,FB_RET_BOOL,0}, {"keys",w_keys,1,1,FB_RET_LIST,0},
+		{"values",w_values,1,1,FB_RET_LIST,0}, {"items",w_items,1,1,FB_RET_LIST,0},
+		/* cli args */
+		{"flag",w_flag,1,-1,FB_RET_BOOL,0}, {"opt",w_opt,2,2,FB_RET_STR,0},
+		{"positionals",w_positionals,0,0,FB_RET_LIST,0},
+	};
+	for (size_t i = 0; i < sizeof base / sizeof base[0]; i++)
+		fb_register(S, &base[i]);
+}
+
+/* public init (fbuild.h): register ABI builtins before check/run. Idempotent. */
+void fb_init(void) { fb_open_base(&g_fb_state); }
+
+#undef AR
+#undef AC
+#undef AI
+#undef RV
+#undef WV1
+#undef WV2
+#undef WC1
+#undef WC2
+#undef WVN
 
 /* ---- driver ----------------------------------------------------------- */
 
@@ -2724,4 +2674,73 @@ void run_program(ast *prog, int argc, char **argv) {
 	}
 
 	build_flush_outputs();
+}
+
+/* ============================================================================
+ * Embedding API (fbuild.h) — single implicit state (S0/S1).
+ * ========================================================================== */
+
+fb_State *fb_new(void) {
+	arena_init();
+	memset(&g_fb_state, 0, sizeof g_fb_state);
+	fb_init();
+	return &g_fb_state;
+}
+
+void fb_close(fb_State *S) {
+	(void)S;
+	arena_fini();
+}
+
+void fb_set_args(fb_State *S, int argc, char **argv) {
+	S->argc = argc;
+	S->argv = argv;
+}
+
+const char *fb_error_msg(fb_State *S) { return S->err_msg; }
+
+int fb_dostring(fb_State *S, const char *src, const char *chunkname) {
+	(void)chunkname;
+	S->err_msg[0] = '\0';
+	p = a_alloc(sizeof *p + sizeof(token) * MAX_TOKENS);
+	lex(a_dup(src));                 /* lexer wants a writable, arena-owned buf */
+	ast *prog = parse_program();
+	if (getenv("DUMP_AST")) ast_print(prog, 0);
+	fb_init();
+
+	/* runtime fb_error() unwinds here (parse-time die() still exits: S1 limit). */
+	if (setjmp(S->err_jmp)) { S->err_set = 0; return 1; }
+	S->err_set = 1;
+
+	int errs = infer_program(prog);
+	if (errs) {
+		S->err_set = 0;
+		snprintf(S->err_msg, sizeof S->err_msg,
+		         "%d type error%s", errs, errs == 1 ? "" : "s");
+		return 1;
+	}
+	run_program(prog, S->argc, S->argv);
+	S->err_set = 0;
+	return 0;
+}
+
+int fb_dofile(fb_State *S, const char *path) {
+	FILE *f = fopen(path, "rb");
+	if (!f) { snprintf(S->err_msg, sizeof S->err_msg, "cannot open '%s'", path); return 1; }
+	fseek(f, 0, SEEK_END);
+	long n = ftell(f);
+	if (n < 0) { fclose(f); snprintf(S->err_msg, sizeof S->err_msg, "cannot read '%s'", path); return 1; }
+	rewind(f);
+	char *buf = a_alloc((size_t)n + 1);
+	size_t got = fread(buf, 1, (size_t)n, f);
+	fclose(f);
+	buf[got] = '\0';
+	return fb_dostring(S, buf, path);
+}
+
+fb_Value fb_global(fb_State *S, const char *name) {
+	(void)S;
+	token t = { .string = (char *)name, .len = strlen(name) };
+	rval *v = def_lookup(&t);
+	return (fb_Value)(v ? v : &RV_UNIT);
 }
