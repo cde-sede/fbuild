@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.10"
+#define FBUILD_VERSION "0.1.11"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -624,7 +624,7 @@ static rval *call_builtin1(const char *name, rval *arg);  /* defined below */
  * matching the single-threaded coroutine model). Declared before apply()
  * because apply dispatches native callables (RV_CFUN) through g_active. */
 struct fb_class;
-#define FB_MAX_REG 256
+#define FB_MAX_REG 1024   /* core builtins + host/plugin (full raylib ~660) */
 
 typedef struct {
 	def    defs[512]; size_t ndefs;
@@ -688,6 +688,8 @@ void fb_register(fb_State *S, const fb_Reg *reg) {
 	for (int i = 0; i < g_nreg; i++)          /* last registration wins */
 		if (!strcmp(g_regs[i].name, reg->name)) { g_regs[i] = *reg; return; }
 	if (g_nreg < FB_MAX_REG) g_regs[g_nreg++] = *reg;
+	else fprintf(stderr, "fbuild: builtin registry full (%d), dropped '%s'\n",
+	             FB_MAX_REG, reg->name);
 }
 const fb_Reg *fb_reg_findn(const char *name, size_t len) {
 	for (int i = 0; i < g_nreg; i++)
