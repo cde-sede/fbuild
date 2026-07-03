@@ -49,9 +49,16 @@ typedef enum {
 	FB_RET_UNIT,
 } fb_Ret;
 
-/* A builtin: receives its already-evaluated arguments (splats flattened).
+/* A builtin: by default receives its already-evaluated arguments (splats
+ * flattened). With FB_LAZY the args arrive UNEVALUATED as thunks (splats are
+ * NOT flattened, one thunk per source argument) and the builtin decides what to
+ * evaluate, and when, by calling fb_force() -- this is how you write control
+ * forms (a custom `bench`, lazy defaults, short-circuiting helpers).
  * Return a value made with the fb_* constructors, or fb_error() to abort. */
 typedef fb_Value (*fb_CFunction)(fb_State *S, fb_Value *args, int nargs);
+
+/* fb_Reg.flags */
+#define FB_LAZY 1u    /* args are thunks; force them with fb_force() */
 
 /* Registration record. `max < 0` means variadic. `ret` drives type inference. */
 typedef struct {
@@ -59,8 +66,12 @@ typedef struct {
 	fb_CFunction fn;
 	int          min, max;
 	fb_Ret       ret;
-	unsigned     flags;   /* reserved (0 for now) */
+	unsigned     flags;   /* 0, or a bitwise-or of FB_* flags */
 } fb_Reg;
+
+/* Evaluate a thunk argument passed to an FB_LAZY builtin (returns it unchanged
+ * if it is already a value). Safe to call more than once (re-evaluates). */
+fb_Value fb_force(fb_State *S, fb_Value thunk);
 
 /* ---- lifecycle / embedding -------------------------------------------- */
 /* Register the interpreter's own ABI builtins. Called by fb_new(); host code
@@ -114,14 +125,17 @@ fb_Value fb_list(fb_State *S);
 void     fb_push(fb_State *S, fb_Value list, fb_Value e);
 fb_Value fb_map (fb_State *S);
 void     fb_set (fb_State *S, fb_Value map, const char *key, fb_Value v);
+fb_Value fb_cmd (fb_State *S);                       /* an empty command (argv) */
+void     fb_cmd_push(fb_State *S, fb_Value cmd, fb_Value word); /* append a word */
 
 /* ---- value inspection ------------------------------------------------- */
 fb_Kind     fb_kind (fb_Value v);
 long        fb_toint(fb_Value v);
 const char *fb_tostr(fb_State *S, fb_Value v);   /* coerces int/bool/file  */
 int         fb_len  (fb_Value v);                /* list/tuple/map size    */
-fb_Value    fb_at   (fb_Value v, int i);         /* list/tuple element     */
+fb_Value    fb_at   (fb_Value v, int i);         /* list/tuple/map value #i */
 fb_Value    fb_field(fb_Value v, const char *k); /* map value by key (nil) */
+const char *fb_key  (fb_Value map, int i);       /* map key #i (NULL if oob) */
 
 /* ---- calling back into the language ----------------------------------- */
 fb_Value fb_apply(fb_State *S, fb_Value fn, fb_Value *args, int nargs);

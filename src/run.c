@@ -72,6 +72,7 @@ typedef enum {
 	RV_LAMBDA, RV_MORPH,
 	RV_BUILTIN,     /* a builtin referenced as a value (.s = name)        */
 	RV_MAP,         /* JSON object: keys[] -> items[] (insertion order)   */
+	RV_THUNK,       /* unevaluated arg to an FB_LAZY builtin (body + env)  */
 } rkind;
 
 typedef struct rval rval;
@@ -675,7 +676,9 @@ fb_Value fb_str (fb_State *S, const char *s){ (void)S; return (fb_Value)rv_str(a
 fb_Value fb_file(fb_State *S, const char *p){ (void)S; return (fb_Value)rv_file(a_dup(p ? p : "")); }
 fb_Value fb_list(fb_State *S)              { (void)S; return (fb_Value)rv(RV_LIST); }
 fb_Value fb_map (fb_State *S)              { (void)S; return (fb_Value)rv(RV_MAP); }
+fb_Value fb_cmd (fb_State *S)              { (void)S; return (fb_Value)rv(RV_CMD); }
 void     fb_push(fb_State *S, fb_Value l, fb_Value e) { (void)S; rv_push((rval*)l, (rval*)e); }
+void     fb_cmd_push(fb_State *S, fb_Value c, fb_Value w) { (void)S; rv_push((rval*)c, (rval*)w); }
 void     fb_set (fb_State *S, fb_Value m, const char *k, fb_Value v) {
 	(void)S; map_set((rval*)m, a_dup(k ? k : ""), (rval*)v);
 }
@@ -707,6 +710,18 @@ fb_Value    fb_at   (fb_Value v, int i) {
 	return (fb_Value)r->items[i];
 }
 fb_Value    fb_field(fb_Value v, const char *k) { return (fb_Value)map_get((rval*)v, k ? k : ""); }
+const char *fb_key(fb_Value v, int i) {
+	rval *r = (rval*)v;
+	if (!r || r->k != RV_MAP || i < 0 || (size_t)i >= r->n) return NULL;
+	return r->keys[i];
+}
+
+fb_Value fb_force(fb_State *S, fb_Value thunk) {
+	(void)S;
+	rval *r = (rval*)thunk;
+	if (r && r->k == RV_THUNK) return (fb_Value)eval(r->body, r->env);
+	return thunk;
+}
 
 fb_Value fb_apply(fb_State *S, fb_Value fn, fb_Value *args, int nargs) {
 	(void)S;
@@ -1520,6 +1535,7 @@ static void repr(sbuf *s, rval *v) {
 	case RV_MORPH:   sb_puts(s, "<"); sb_puts(s, v->from);
 	                 sb_puts(s, " // "); sb_puts(s, v->to); sb_puts(s, ">"); break;
 	case RV_BUILTIN: sb_puts(s, "<builtin "); sb_puts(s, v->s); sb_puts(s, ">"); break;
+	case RV_THUNK:   sb_puts(s, "<thunk>");                     break;
 	}
 }
 
@@ -1569,6 +1585,7 @@ static void debug_repr(sbuf *s, rval *v) {
 	case RV_LAMBDA:  sb_puts(s, "Lambda("); sb_putl(s, (long)(v->params ? v->params->nkids : 0)); sb_puts(s, " params)"); break;
 	case RV_MORPH:   sb_puts(s, "Morph("); sb_puts(s, v->from); sb_puts(s, " // "); sb_puts(s, v->to); sb_putc(s, ')'); break;
 	case RV_BUILTIN: sb_puts(s, "Builtin("); sb_puts(s, v->s); sb_putc(s, ')'); break;
+	case RV_THUNK:   sb_puts(s, "Thunk");                       break;
 	}
 }
 
@@ -2411,30 +2428,22 @@ static rval *eval(ast *n, renv *e) {
 			return do_parse(schema, argv);
 		}
 		if (callee->kind == AST_ID) {
-			/* bench(label, expr): the one builtin that must stay lazy -- it
-			 * times evaluation of its (unevaluated) expr, so it cannot go
-			 * through the eager registry ABI. Everything else is registered. */
-			if (tok_is(callee->tok, "bench")) {
-				const char *label = as_cstr(eval(n->kids[1], e));
-				struct timespec t0, t1;
-				clock_gettime(CLOCK_MONOTONIC, &t0);
-				rval *r = eval(n->kids[2], e);
-				clock_gettime(CLOCK_MONOTONIC, &t1);
-				if (g_bench) {
-					double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3
-					          + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
-					size_t cap = strlen(label) + 64;
-					char *line = a_alloc(cap);
-					snprintf(line, cap, "[bench] %s: %.3f ms", label, ms);
-					print_emit(line);
-				}
-				return r;
-			}
-
-			/* registered builtin (core + host/plugin): evaluate args (splats
-			 * flatten) and dispatch through the extension ABI (fbuild.h). */
+			/* registered builtin (core + host/plugin). FB_LAZY builtins get
+			 * their args as unevaluated thunks (no splat flatten); everyone else
+			 * gets evaluated, splat-flattened args. Dispatch through the ABI. */
 			const fb_Reg *rg = fb_reg_find_tok(callee->tok);
 			if (rg) {
+				if (rg->flags & FB_LAZY) {
+					size_t na2 = n->nkids - 1;
+					rval **th = na2 ? a_alloc(na2 * sizeof *th) : NULL;
+					for (size_t i = 0; i < na2; i++) {
+						rval *t = rv(RV_THUNK);
+						t->body = n->kids[i + 1];
+						t->env  = e;
+						th[i] = t;
+					}
+					return fb_dispatch(rg, th, na2);
+				}
 				size_t k; rval **as = eval_args(n, e, &k);
 				return fb_dispatch(rg, as, k);
 			}
@@ -2465,7 +2474,8 @@ static rval *eval(ast *n, renv *e) {
  * ABI (fbuild.h). Thin wrappers marshal already-evaluated fb_Value args to the
  * existing do_* implementations; the registry table below is the single source
  * of truth for names, arity, and (for the checker, on extern names) return type.
- * `bench` is the sole exception -- it must stay lazy and lives in eval().
+ * `bench` is registered FB_LAZY (its args stay unevaluated); everything else is
+ * eager. No builtin is special-cased in eval() anymore.
  * ========================================================================== */
 
 #define AR(i) ((rval *)a[i])
@@ -2540,6 +2550,24 @@ static fb_Value w_pad(fb_State*S,fb_Value*a,int n,int side){(void)S;
 static fb_Value w_pad_left (fb_State*S,fb_Value*a,int n){return w_pad(S,a,n,-1);}
 static fb_Value w_pad_right(fb_State*S,fb_Value*a,int n){return w_pad(S,a,n, 1);}
 static fb_Value w_center   (fb_State*S,fb_Value*a,int n){return w_pad(S,a,n, 0);}
+/* bench(label, expr): FB_LAZY -- times evaluation of the (unevaluated) expr
+ * between two clock reads, prints elapsed when --bench is set, returns expr's
+ * value so it stays transparent in a pipeline. The reference lazy builtin. */
+static fb_Value w_bench(fb_State*S,fb_Value*a,int n){(void)n;
+	const char *label = as_cstr((rval *)fb_force(S, a[0]));
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	rval *r = (rval *)fb_force(S, a[1]);
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	if (g_bench) {
+		double ms = (double)(t1.tv_sec - t0.tv_sec) * 1e3
+		          + (double)(t1.tv_nsec - t0.tv_nsec) / 1e6;
+		size_t cap = strlen(label) + 64;
+		char *line = a_alloc(cap);
+		snprintf(line, cap, "[bench] %s: %.3f ms", label, ms);
+		print_emit(line);
+	}
+	return (fb_Value)r; }
 /* run(targets...): build a target (single, or a tuple = parallel), run it,
  * return whether it carried any work. Eager: args are evaluated commands/seqs. */
 static fb_Value w_run(fb_State*S,fb_Value*a,int n){(void)S;
@@ -2560,7 +2588,7 @@ static void fb_open_base(fb_State *S) {
 		{"debug",w_debug,0,-1,FB_RET_UNIT,0}, {"config",w_config,1,1,FB_RET_UNIT,0},
 		/* time */
 		{"clock",w_clock,0,0,FB_RET_INT,0}, {"time",w_time,0,0,FB_RET_INT,0},
-		{"sleep",w_sleep,1,1,FB_RET_UNIT,0},
+		{"sleep",w_sleep,1,1,FB_RET_UNIT,0}, {"bench",w_bench,2,2,FB_RET_ANY,FB_LAZY},
 		/* filesystem */
 		{"glob",w_glob,1,1,FB_RET_LIST,0}, {"exists",w_exists,1,1,FB_RET_BOOL,0},
 		{"mkdir",w_mkdir,1,1,FB_RET_FILE,0}, {"read",w_read,1,1,FB_RET_STR,0},
