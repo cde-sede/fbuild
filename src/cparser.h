@@ -11,6 +11,12 @@
  * exit. See arena_init / arena_fini. */
 void  arena_init(void);
 void  arena_fini(void);
+/* multi-state: each interpreter owns its own arena. arena_new() creates one,
+ * arena_use() selects the arena that a_alloc/a_dup target, arena_free() frees
+ * it. (arena_init/arena_fini are the single-arena convenience wrappers.) */
+void *arena_new(void);
+void  arena_use(void *arena);
+void  arena_free(void *arena);
 void *a_alloc(size_t n);
 void *a_grow(void *old, size_t oldn, size_t newn);
 char *a_dup(const char *s);

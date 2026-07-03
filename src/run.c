@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.9"
+#define FBUILD_VERSION "0.1.10"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -615,16 +615,39 @@ static void bind_params(renv *e, ast *params, rval *arg) {
 
 static rval *call_builtin1(const char *name, rval *arg);  /* defined below */
 
-/* interpreter state (single implicit state). Declared before apply() because
- * apply dispatches native callables (RV_CFUN) through g_fb_state. */
+/* ---- multiple interpreters (fb_State) --------------------------------------
+ * The interpreter keeps its working set in the g_* globals above/below. Each
+ * fb_State owns its own arena plus a saved snapshot of those globals; switching
+ * the active state (fb_activate) saves the outgoing state's globals into its
+ * snapshot and loads the incoming state's, and points the arena at the new one.
+ * So several independent interpreters can coexist (they don't run interleaved,
+ * matching the single-threaded coroutine model). Declared before apply()
+ * because apply dispatches native callables (RV_CFUN) through g_active. */
+struct fb_class;
+#define FB_MAX_REG 256
+
+typedef struct {
+	def    defs[512]; size_t ndefs;
+	renv   top; t_env env;
+	rval  *args, *cwd;
+	int    in_run, bench;
+	char **print_q; size_t print_n, print_cap;
+	fb_Reg regs[FB_MAX_REG]; int nreg;
+	struct fb_class *classes;
+	rval  *spinner;
+} fb_globals;
+
 struct fb_State {
-	jmp_buf err_jmp;      /* protected-call boundary                     */
-	int     err_set;      /* 1 when a boundary is installed              */
-	char    err_msg[512];
-	int     argc;         /* args handed to the script (fb_set_args)     */
-	char  **argv;
+	jmp_buf   err_jmp;      /* protected-call boundary                     */
+	int       err_set;      /* 1 when a boundary is installed              */
+	char      err_msg[512];
+	int       argc;         /* args handed to the script (fb_set_args)     */
+	char    **argv;
+	void     *arena;        /* this interpreter's allocation arena         */
+	fb_globals snap;        /* globals held while this state is inactive   */
 };
-static struct fb_State g_fb_state;
+static struct fb_State *g_active;   /* the interpreter whose globals are live */
+static void fb_activate(struct fb_State *S);   /* make S's globals live */
 
 static rval *apply(rval *fn, rval *arg) {
 	if (!fn) return &RV_UNIT;
@@ -641,9 +664,9 @@ static rval *apply(rval *fn, rval *arg) {
 	if (fn->k == RV_CFUN) {                 /* native method/callable */
 		fb_CFunction f = (fb_CFunction)fn->nat;
 		if (arg->k == RV_TUPLE)
-			return (rval *)f(&g_fb_state, (fb_Value *)arg->items, (int)arg->n);
+			return (rval *)f(g_active, (fb_Value *)arg->items, (int)arg->n);
 		rval *one[1] = { arg };
-		return (rval *)f(&g_fb_state, (fb_Value *)one, 1);
+		return (rval *)f(g_active, (fb_Value *)one, 1);
 	}
 	return &RV_UNIT;
 }
@@ -656,12 +679,11 @@ static rval *apply(rval *fn, rval *arg) {
  * so registered names extend the language without touching core.
  * ========================================================================== */
 
-#define FB_MAX_REG 256
-static fb_Reg g_regs[FB_MAX_REG];
+static fb_Reg g_regs[FB_MAX_REG];   /* live registry (part of the active state) */
 static int    g_nreg;
 
 void fb_register(fb_State *S, const fb_Reg *reg) {
-	(void)S;
+	fb_activate(S);
 	if (!reg || !reg->name || !reg->fn) return;
 	for (int i = 0; i < g_nreg; i++)          /* last registration wins */
 		if (!strcmp(g_regs[i].name, reg->name)) { g_regs[i] = *reg; return; }
@@ -749,7 +771,7 @@ fb_Value fb_apply(fb_State *S, fb_Value fn, fb_Value *args, int nargs) {
 }
 
 fb_Value fb_error(fb_State *S, const char *fmt, ...) {
-	if (!S) S = &g_fb_state;
+	if (!S) S = g_active;
 	va_list ap; va_start(ap, fmt);
 	vsnprintf(S->err_msg, sizeof S->err_msg, fmt, ap);
 	va_end(ap);
@@ -762,9 +784,9 @@ fb_Value fb_error(fb_State *S, const char *fmt, ...) {
  * evaluated (splats flattened). */
 static rval *fb_dispatch(const fb_Reg *rg, rval **as, size_t k) {
 	if ((int)k < rg->min || (rg->max >= 0 && (int)k > rg->max))
-		fb_error(&g_fb_state, "%s: expects %d..%d args, got %zu",
+		fb_error(g_active, "%s: expects %d..%d args, got %zu",
 		         rg->name, rg->min, rg->max, k);
-	return (rval *)rg->fn(&g_fb_state, (fb_Value *)as, (int)k);
+	return (rval *)rg->fn(g_active, (fb_Value *)as, (int)k);
 }
 
 /* ---- custom objects: classes + methods -------------------------------- */
@@ -831,13 +853,13 @@ static rval *make_cfun(fb_CFunction fn) {
 
 /* ABI: define classes, attach native methods, instantiate native objects. */
 fb_Class fb_class(fb_State *S, const char *name) {
-	(void)S; return (fb_Class)class_ensure(name);
+	fb_activate(S); return (fb_Class)class_ensure(name);
 }
 void fb_method(fb_State *S, fb_Class c, const char *name, fb_CFunction fn) {
-	(void)S; class_add_method((fb_class_t *)c, name, make_cfun(fn));
+	fb_activate(S); class_add_method((fb_class_t *)c, name, make_cfun(fn));
 }
 fb_Value fb_object(fb_State *S, fb_Class c, void *data) {
-	(void)S; return (fb_Value)make_object((fb_class_t *)c, NULL, data);
+	fb_activate(S); return (fb_Value)make_object((fb_class_t *)c, NULL, data);
 }
 void *fb_object_data(fb_Value v) {
 	rval *r = (rval *)v;
@@ -2791,7 +2813,7 @@ static void fb_open_base(fb_State *S) {
 }
 
 /* public init (fbuild.h): register ABI builtins before check/run. Idempotent. */
-void fb_init(void) { fb_open_base(&g_fb_state); }
+void fb_init(void) { fb_open_base(g_active); }
 
 #undef AR
 #undef AC
@@ -2858,16 +2880,47 @@ void run_program(ast *prog, int argc, char **argv) {
  * Embedding API (fbuild.h) — single implicit state (S0/S1).
  * ========================================================================== */
 
+/* save the live globals into S's snapshot */
+static void fb_gsave(struct fb_State *S) {
+	fb_globals *g = &S->snap;
+	memcpy(g->defs, g_defs, sizeof g_defs); g->ndefs = g_ndefs;
+	g->top = g_top; g->env = g_env; g->args = g_args; g->cwd = g_cwd;
+	g->in_run = g_in_run; g->bench = g_bench;
+	g->print_q = g_print_q; g->print_n = g_print_n; g->print_cap = g_print_cap;
+	memcpy(g->regs, g_regs, sizeof g_regs); g->nreg = g_nreg;
+	g->classes = g_classes; g->spinner = g_spinner;
+}
+/* load S's snapshot into the live globals */
+static void fb_gload(struct fb_State *S) {
+	fb_globals *g = &S->snap;
+	memcpy(g_defs, g->defs, sizeof g_defs); g_ndefs = g->ndefs;
+	g_top = g->top; g_env = g->env; g_args = g->args; g_cwd = g->cwd;
+	g_in_run = g->in_run; g_bench = g->bench;
+	g_print_q = g->print_q; g_print_n = g->print_n; g_print_cap = g->print_cap;
+	memcpy(g_regs, g->regs, sizeof g_regs); g_nreg = g->nreg;
+	g_classes = g->classes; g_spinner = g->spinner;
+}
+static void fb_activate(struct fb_State *S) {
+	if (g_active == S) return;
+	if (g_active) fb_gsave(g_active);
+	g_active = S;
+	fb_gload(S);
+	arena_use(S->arena);
+}
+
 fb_State *fb_new(void) {
-	arena_init();
-	memset(&g_fb_state, 0, sizeof g_fb_state);
-	fb_init();
-	return &g_fb_state;
+	struct fb_State *S = calloc(1, sizeof *S);
+	if (!S) { fprintf(stderr, "out of memory\n"); exit(1); }
+	S->arena = arena_new();
+	fb_activate(S);   /* loads S's (zeroed) globals + points the arena at S */
+	fb_init();        /* register core builtins into S's registry */
+	return S;
 }
 
 void fb_close(fb_State *S) {
-	(void)S;
-	arena_fini();
+	arena_free(S->arena);
+	if (g_active == S) g_active = NULL;   /* live globals now dangle until next activate */
+	free(S);
 }
 
 void fb_set_args(fb_State *S, int argc, char **argv) {
@@ -2881,6 +2934,7 @@ static int fb_load_env_plugins(fb_State *S);
 
 int fb_dostring(fb_State *S, const char *src, const char *chunkname) {
 	(void)chunkname;
+	fb_activate(S);
 	S->err_msg[0] = '\0';
 	fb_init();
 	if (fb_load_env_plugins(S)) return 1;   /* $FBUILD_PLUGINS, before check */
@@ -2906,6 +2960,7 @@ int fb_dostring(fb_State *S, const char *src, const char *chunkname) {
 }
 
 int fb_dofile(fb_State *S, const char *path) {
+	fb_activate(S);
 	FILE *f = fopen(path, "rb");
 	if (!f) { snprintf(S->err_msg, sizeof S->err_msg, "cannot open '%s'", path); return 1; }
 	fseek(f, 0, SEEK_END);
@@ -2920,13 +2975,14 @@ int fb_dofile(fb_State *S, const char *path) {
 }
 
 fb_Value fb_global(fb_State *S, const char *name) {
-	(void)S;
+	fb_activate(S);
 	token t = { .string = (char *)name, .len = strlen(name) };
 	rval *v = def_lookup(&t);
 	return (fb_Value)(v ? v : &RV_UNIT);
 }
 
 int fb_load_plugin(fb_State *S, const char *path) {
+	fb_activate(S);
 	void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
 	if (!h) {
 		snprintf(S->err_msg, sizeof S->err_msg, "plugin: %s", dlerror());

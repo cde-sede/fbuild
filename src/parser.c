@@ -15,10 +15,15 @@ size_t         cur = 0;
 
 static mem_arena *g_arena;
 
-void arena_init(void) {
-	g_arena = arena_create(GiB(4), MiB(1));   /* 4 GiB reserved, 1 MiB committed */
-	if (!g_arena) { fprintf(stderr, "out of memory\n"); exit(1); }
+void *arena_new(void) {
+	mem_arena *a = arena_create(GiB(4), MiB(1));   /* 4 GiB reserved, 1 MiB committed */
+	if (!a) { fprintf(stderr, "out of memory\n"); exit(1); }
+	return a;
 }
+void arena_use(void *a)  { g_arena = (mem_arena *)a; }
+void arena_free(void *a) { if (a) arena_destroy((mem_arena *)a); }
+
+void arena_init(void) { arena_use(arena_new()); }
 void arena_fini(void) {
 	if (g_arena) arena_destroy(g_arena);
 	g_arena = NULL;

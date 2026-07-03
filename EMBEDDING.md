@@ -5,7 +5,9 @@ C API in `src/fbuild.h`. A host program creates an interpreter, optionally
 registers its own builtins, runs a script, and reads results back. The `fbuild`
 CLI is itself just a thin driver over this API (`src/main.c`).
 
-Single implicit state: one interpreter per process.
+You can create several independent interpreters. They don't run interleaved
+(the runtime is single-threaded/cooperative), but each keeps its own arena,
+definitions, registered builtins, and object classes — fully isolated.
 
 ## Minimal host
 
@@ -48,6 +50,24 @@ Add `-rdynamic -ldl` if the host also loads plugins (so a plugin can resolve the
 | `int fb_dofile(fb_State*, const char *path)` | Same, reading a file. |
 | `const char *fb_error_msg(fb_State*)` | Message after a non-zero return. |
 | `fb_Value fb_global(fb_State*, const char *name)` | A top-level def's value after a run (nil if absent). |
+
+## Multiple interpreters
+
+`fb_new()` returns an independent interpreter; create as many as you like. Each
+owns its arena, top-level defs, registered builtins, and classes — nothing
+leaks between them. Operations (`fb_dostring`, `fb_register`, `fb_global`, …)
+implicitly make their state the active one; because they don't run interleaved,
+just call them one state at a time.
+
+```c
+fb_State *a = fb_new();  fb_register(a, &ra);  fb_dofile(a, "a.fb");
+fb_State *b = fb_new();  fb_register(b, &rb);  fb_dofile(b, "b.fb");
+long na = fb_toint(fb_global(a, "n"));   /* a's globals, restored on demand */
+fb_close(a); fb_close(b);
+```
+
+Values belong to the state that created them; read them back while that state is
+the one you're operating on (any call on it re-activates it).
 
 ## Registering a host builtin
 
