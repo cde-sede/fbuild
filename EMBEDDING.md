@@ -112,6 +112,35 @@ static fb_Value l_pick(fb_State *S, fb_Value *a, int n) {   /* pick(cond,x,y) */
 fb_register(S, &(fb_Reg){ "pick", l_pick, 3, 3, FB_RET_ANY, FB_LAZY });
 ```
 
+## Custom object types
+
+Define a class, attach native methods, and hand instances (optionally wrapping
+opaque C data) to the script. A method is called as `obj.name(args)` in the
+language and receives the object as its first (self) argument.
+
+```c
+typedef struct { long n; } Counter;
+static fb_Class CLS;
+
+static fb_Value l_inc(fb_State *S, fb_Value *a, int n) {   /* inc(self[, k]) */
+    Counter *c = fb_object_data(a[0]);
+    c->n += (n > 1) ? fb_toint(a[1]) : 1;
+    return a[0];                                            /* self, for chaining */
+}
+static fb_Value l_get(fb_State *S, fb_Value *a, int n) {
+    (void)n; return fb_int(S, ((Counter *)fb_object_data(a[0]))->n);
+}
+
+CLS = fb_class(S, "Counter");
+fb_method(S, CLS, "inc", l_inc);
+fb_method(S, CLS, "get", l_get);
+/* a constructor builtin returns fb_object(S, CLS, malloc(sizeof(Counter))) */
+```
+
+Objects also carry a field map: build with `fb_set`, read with `fb_field` /
+`fb_key`. The language `type`/`method` forms use the same machinery, so language
+and native objects are interchangeable.
+
 ## Errors
 
 `fb_error(S, fmt, ...)` aborts the current builtin. Under `fb_dostring` it

@@ -105,6 +105,28 @@ int fbuild_open(fb_State *S) {
 }
 ```
 
+## Custom object types
+
+A plugin can define a new object type with a constructor and methods callable as
+`obj.method(args)`. See EMBEDDING.md for the full example; the shape is:
+
+```c
+fb_Class CLS = fb_class(S, "Socket");
+fb_method(S, CLS, "send",  l_send);       /* l_send(self, data) */
+fb_method(S, CLS, "close", l_close);
+/* a constructor builtin returns fb_object(S, CLS, native_ptr) */
+```
+
+```
+s = socket_open("host", 8080)   # constructor builtin
+s.send("hi")                     # method: self = s
+s.close()
+```
+
+`fb_object_data` retrieves the native pointer inside a method. Objects also have
+a field map (`fb_set` / `fb_field` / `fb_key`), interchangeable with language
+`type` objects.
+
 ## ABI stability
 
 `FBUILD_ABI` (in `fbuild.h`) is bumped on any incompatible change to the ABI.

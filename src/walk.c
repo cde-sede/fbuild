@@ -34,6 +34,8 @@ char *AST_NODE_NAMES[] = {
 	[AST_NOT] = "AST_NOT",
 	[AST_MORPHISM] = "AST_MORPHISM",
 
+	[AST_OBJNEW] = "AST_OBJNEW",
+	[AST_METHODDEF] = "AST_METHODDEF",
 	[AST_CALL] = "AST_CALL",
 	[AST_FIELD] = "AST_FIELD",
 	[AST_CONSTRUCT] = "AST_CONSTRUCT",
@@ -669,6 +671,16 @@ static obj_type *infer(ast *node, scope *sc) {
 	}
 
 	case AST_CALL:    t = infer_call(node, sc); break;
+
+	case AST_OBJNEW:                                 /* object of unknown shape */
+		infer(node->kids[0], sc);                    /* check the fields body    */
+		t = t_new(RET_VAR);
+		break;
+
+	case AST_METHODDEF:                              /* method Class.name = fn   */
+		infer(node->kids[1], sc);   /* the lambda; kids[0] is the class name id, */
+		t = t_new(RET_NONE);        /* not a variable, so don't infer it         */
+		break;
 
 	case AST_COMPARE: {
 		obj_type *l = infer(node->kids[0], sc);

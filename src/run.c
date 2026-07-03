@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.8"
+#define FBUILD_VERSION "0.1.9"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -73,6 +73,8 @@ typedef enum {
 	RV_BUILTIN,     /* a builtin referenced as a value (.s = name)        */
 	RV_MAP,         /* JSON object: keys[] -> items[] (insertion order)   */
 	RV_THUNK,       /* unevaluated arg to an FB_LAZY builtin (body + env)  */
+	RV_OBJECT,      /* tagged object: cls + fields(keys/items) + nat data  */
+	RV_CFUN,        /* native callable (nat = fb_CFunction); a method impl */
 } rkind;
 
 typedef struct rval rval;
@@ -91,6 +93,8 @@ struct rval {
 	renv   *env;        /* lambda closure                      */
 	char   *from, *to;  /* morphism patterns                   */
 	char   *label;      /* def name, for group display         */
+	void   *cls;        /* RV_OBJECT: its class (struct fb_class*) */
+	void   *nat;        /* RV_OBJECT: native data; RV_CFUN: fb_CFunction */
 };
 
 struct rbind { token *name; rval *val; struct rbind *next; };
@@ -148,7 +152,7 @@ static void map_set(rval *m, char *key, rval *val) {
 	m->n++;
 }
 static rval *map_get(rval *m, const char *key) {
-	if (!m || m->k != RV_MAP) return &RV_UNIT;
+	if (!m || (m->k != RV_MAP && m->k != RV_OBJECT)) return &RV_UNIT;
 	for (size_t i = 0; i < m->n; i++)
 		if (!strcmp(m->keys[i], key)) return m->items[i];
 	return &RV_UNIT;
@@ -611,6 +615,17 @@ static void bind_params(renv *e, ast *params, rval *arg) {
 
 static rval *call_builtin1(const char *name, rval *arg);  /* defined below */
 
+/* interpreter state (single implicit state). Declared before apply() because
+ * apply dispatches native callables (RV_CFUN) through g_fb_state. */
+struct fb_State {
+	jmp_buf err_jmp;      /* protected-call boundary                     */
+	int     err_set;      /* 1 when a boundary is installed              */
+	char    err_msg[512];
+	int     argc;         /* args handed to the script (fb_set_args)     */
+	char  **argv;
+};
+static struct fb_State g_fb_state;
+
 static rval *apply(rval *fn, rval *arg) {
 	if (!fn) return &RV_UNIT;
 	if (fn->k == RV_BUILTIN) return call_builtin1(fn->s, arg);
@@ -623,6 +638,13 @@ static rval *apply(rval *fn, rval *arg) {
 		if (arg->k != RV_FILE) return &RV_UNIT;
 		return rv_file(subst_a(fn->from, fn->to, arg->s));
 	}
+	if (fn->k == RV_CFUN) {                 /* native method/callable */
+		fb_CFunction f = (fb_CFunction)fn->nat;
+		if (arg->k == RV_TUPLE)
+			return (rval *)f(&g_fb_state, (fb_Value *)arg->items, (int)arg->n);
+		rval *one[1] = { arg };
+		return (rval *)f(&g_fb_state, (fb_Value *)one, 1);
+	}
 	return &RV_UNIT;
 }
 
@@ -633,16 +655,6 @@ static rval *apply(rval *fn, rval *arg) {
  * eval() if-chains; the registry is consulted for anything not matched there,
  * so registered names extend the language without touching core.
  * ========================================================================== */
-
-struct fb_State {
-	jmp_buf err_jmp;      /* protected-call boundary                     */
-	int     err_set;      /* 1 when a boundary is installed              */
-	char    err_msg[512];
-	int     argc;         /* args handed to the script (fb_set_args)     */
-	char  **argv;
-};
-
-static struct fb_State g_fb_state;
 
 #define FB_MAX_REG 256
 static fb_Reg g_regs[FB_MAX_REG];
@@ -698,6 +710,7 @@ fb_Kind fb_kind(fb_Value v) {
 	case RV_CMD:    return FB_CMD;
 	case RV_MAP:    return FB_MAP;
 	case RV_LAMBDA: return FB_LAMBDA;
+	case RV_OBJECT: return FB_OBJECT;
 	default:        return FB_OTHER;
 	}
 }
@@ -752,6 +765,83 @@ static rval *fb_dispatch(const fb_Reg *rg, rval **as, size_t k) {
 		fb_error(&g_fb_state, "%s: expects %d..%d args, got %zu",
 		         rg->name, rg->min, rg->max, k);
 	return (rval *)rg->fn(&g_fb_state, (fb_Value *)as, (int)k);
+}
+
+/* ---- custom objects: classes + methods -------------------------------- */
+/* A class is a name plus a method table (each method is an rval callable: a
+ * language RV_LAMBDA or a native RV_CFUN). An object (RV_OBJECT) carries its
+ * class in ->cls, its fields in the map slots (keys/items), and optional native
+ * data in ->nat. Method call `obj.m(args)` applies the method to (self, args).
+ * Both the language (`type`/`method`) and the ABI (fb_class/fb_method) build on
+ * this. */
+typedef struct fb_class {
+	char *name;
+	struct { char *name; rval *val; } *methods;
+	size_t nmethods, cap;
+	struct fb_class *next;
+} fb_class_t;
+
+static fb_class_t *g_classes;
+
+static fb_class_t *class_find(const char *name) {
+	for (fb_class_t *c = g_classes; c; c = c->next)
+		if (!strcmp(c->name, name)) return c;
+	return NULL;
+}
+static fb_class_t *class_ensure(const char *name) {
+	fb_class_t *c = class_find(name);
+	if (c) return c;
+	c = a_alloc(sizeof *c);
+	c->name = a_dup(name);
+	c->methods = NULL; c->nmethods = c->cap = 0;
+	c->next = g_classes; g_classes = c;
+	return c;
+}
+static void class_add_method(fb_class_t *c, const char *name, rval *val) {
+	for (size_t i = 0; i < c->nmethods; i++)
+		if (!strcmp(c->methods[i].name, name)) { c->methods[i].val = val; return; }
+	if (c->nmethods == c->cap) {
+		size_t nc = c->cap ? c->cap * 2 : 4;
+		c->methods = a_grow(c->methods, c->cap * sizeof *c->methods, nc * sizeof *c->methods);
+		c->cap = nc;
+	}
+	c->methods[c->nmethods].name = a_dup(name);
+	c->methods[c->nmethods].val  = val;
+	c->nmethods++;
+}
+static rval *class_method(fb_class_t *c, const char *name) {
+	if (!c) return NULL;
+	for (size_t i = 0; i < c->nmethods; i++)
+		if (!strcmp(c->methods[i].name, name)) return c->methods[i].val;
+	return NULL;
+}
+/* build an object of class c: share `fields`' map slots (if any) + native data */
+static rval *make_object(fb_class_t *c, rval *fields, void *nat) {
+	rval *o = rv(RV_OBJECT);
+	o->cls = c; o->nat = nat;
+	if (fields && (fields->k == RV_MAP || fields->k == RV_OBJECT)) {
+		o->keys = fields->keys; o->items = fields->items;
+		o->n = fields->n; o->cap = fields->cap;
+	}
+	return o;
+}
+static rval *make_cfun(fb_CFunction fn) {
+	rval *v = rv(RV_CFUN); v->nat = (void *)fn; return v;
+}
+
+/* ABI: define classes, attach native methods, instantiate native objects. */
+fb_Class fb_class(fb_State *S, const char *name) {
+	(void)S; return (fb_Class)class_ensure(name);
+}
+void fb_method(fb_State *S, fb_Class c, const char *name, fb_CFunction fn) {
+	(void)S; class_add_method((fb_class_t *)c, name, make_cfun(fn));
+}
+fb_Value fb_object(fb_State *S, fb_Class c, void *data) {
+	(void)S; return (fb_Value)make_object((fb_class_t *)c, NULL, data);
+}
+void *fb_object_data(fb_Value v) {
+	rval *r = (rval *)v;
+	return (r && r->k == RV_OBJECT) ? r->nat : NULL;
 }
 
 /* ---- more builtins ---------------------------------------------------- */
@@ -1536,6 +1626,16 @@ static void repr(sbuf *s, rval *v) {
 	                 sb_puts(s, " // "); sb_puts(s, v->to); sb_puts(s, ">"); break;
 	case RV_BUILTIN: sb_puts(s, "<builtin "); sb_puts(s, v->s); sb_puts(s, ">"); break;
 	case RV_THUNK:   sb_puts(s, "<thunk>");                     break;
+	case RV_CFUN:    sb_puts(s, "<method>");                    break;
+	case RV_OBJECT:
+		sb_puts(s, v->cls ? ((fb_class_t *)v->cls)->name : "object");
+		sb_putc(s, '{');
+		for (size_t i = 0; i < v->n; i++) {
+			if (i) sb_puts(s, ", ");
+			sb_puts(s, v->keys[i]); sb_puts(s, ": "); repr(s, v->items[i]);
+		}
+		sb_putc(s, '}');
+		break;
 	}
 }
 
@@ -1586,6 +1686,17 @@ static void debug_repr(sbuf *s, rval *v) {
 	case RV_MORPH:   sb_puts(s, "Morph("); sb_puts(s, v->from); sb_puts(s, " // "); sb_puts(s, v->to); sb_putc(s, ')'); break;
 	case RV_BUILTIN: sb_puts(s, "Builtin("); sb_puts(s, v->s); sb_putc(s, ')'); break;
 	case RV_THUNK:   sb_puts(s, "Thunk");                       break;
+	case RV_CFUN:    sb_puts(s, "Method");                      break;
+	case RV_OBJECT:
+		sb_puts(s, v->cls ? ((fb_class_t *)v->cls)->name : "Object");
+		sb_putc(s, '{');
+		for (size_t i = 0; i < v->n; i++) {
+			if (i) sb_puts(s, ", ");
+			sb_putc(s, '"'); sb_puts(s, v->keys[i]); sb_puts(s, "\": ");
+			debug_repr(s, v->items[i]);
+		}
+		sb_putc(s, '}');
+		break;
 	}
 }
 
@@ -2295,15 +2406,32 @@ static rval *eval(ast *n, renv *e) {
 		rval *base = eval(n->kids[0], e);
 		if (!n->tok && n->nkids == 2) {       /* dynamic ".{expr}" */
 			rval *k = eval(n->kids[1], e);
-			if (base->k == RV_MAP) return map_get(base, as_cstr(k));
+			if (base->k == RV_MAP || base->k == RV_OBJECT) return map_get(base, as_cstr(k));
 			if (k->k == RV_INT) return positional(base, (size_t)k->i);
 			return file_field_s(base, as_cstr(k));
+		}
+		if (base->k == RV_OBJECT) {            /* method (unbound) or field */
+			rval *m = class_method((fb_class_t *)base->cls, dup_tok(n->tok));
+			return m ? m : map_get(base, dup_tok(n->tok));
 		}
 		if (base->k == RV_MAP)                 /* m.key -> map lookup */
 			return map_get(base, dup_tok(n->tok));
 		long idx = tok_index(n->tok);
 		if (idx >= 0) return positional(base, (size_t)idx);
 		return file_field(base, n->tok);
+	}
+
+	case AST_OBJNEW: {                     /* tag a fields map as an object */
+		fb_class_t *c = class_ensure(dup_tok(n->tok));
+		rval *fields = eval(n->kids[0], e);
+		return make_object(c, fields, NULL);
+	}
+
+	case AST_METHODDEF: {                  /* method Class.name = lambda */
+		fb_class_t *c = class_ensure(dup_tok(n->kids[0]->tok));
+		rval *m = eval(n->kids[1], e);
+		class_add_method(c, dup_tok(n->tok), m);
+		return &RV_UNIT;
 	}
 
 	case AST_PROJECTION: {
@@ -2426,6 +2554,27 @@ static rval *eval(ast *n, renv *e) {
 			rval *schema = eval(callee->kids[0], e);
 			rval *argv = na >= 1 ? eval(n->kids[1], e) : g_args;
 			return do_parse(schema, argv);
+		}
+		/* method call obj.m(args): if the base is an object whose class defines
+		 * `m`, apply the method to (self, ...args). Otherwise fall through (the
+		 * field may hold a plain callable). */
+		if (callee->kind == AST_FIELD && callee->tok && callee->nkids == 1) {
+			rval *self = eval(callee->kids[0], e);
+			if (self->k == RV_OBJECT) {
+				rval *m = class_method((fb_class_t *)self->cls, dup_tok(callee->tok));
+				if (m) {
+					size_t k; rval **as = eval_args(n, e, &k);
+					rval *arg;
+					if (k == 0) {
+						arg = self;
+					} else {
+						arg = rv(RV_TUPLE);
+						rv_push(arg, self);
+						for (size_t i = 0; i < k; i++) rv_push(arg, as[i]);
+					}
+					return apply(m, arg);
+				}
+			}
 		}
 		if (callee->kind == AST_ID) {
 			/* registered builtin (core + host/plugin). FB_LAZY builtins get

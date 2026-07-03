@@ -681,6 +681,8 @@ const char *ast_name[] = {
 	[AST_LOGICAL]="logical",
 	[AST_NOT]="not",
 	[AST_MORPHISM]="morphism",
+	[AST_OBJNEW]="objnew",
+	[AST_METHODDEF]="methoddef",
 	[AST_CALL]="call",
 	[AST_FIELD]="field",
 	[AST_CONSTRUCT]="construct",
@@ -1380,6 +1382,62 @@ static ast *parse_expression(void) {
 	int save = g_no_tuple;
 	g_no_tuple = 0;                  /* tuple-allowing context */
 	ast *res;
+
+	/* type NAME(params) = body : a constructor for a tagged object. Desugars to
+	 * `NAME = params -> <object of class NAME with `body` as its fields>`.
+	 * Contextual: `type` stays a normal identifier unless it starts this shape. */
+	if (peek(.kind = TOK_ID, .string = "type")
+	 && _match((struct obj){ .kind = TOK_ID }, cur + 1)
+	 && _match((struct obj){ .kind = TOK_LPAREN }, cur + 2)) {
+		tok_advance();                              /* 'type' */
+		token *nm = expect(.kind = TOK_ID);         /* class name */
+		expect(.kind = TOK_LPAREN);
+		ast *params = node(AST_PARAMS);
+		skip_nl();
+		if (!peek(.kind = TOK_RPAREN)) {
+			do { skip_nl(); push(params, parse_parameter()); }
+			while (sig_kind() == TOK_COMMA && (skip_nl(), accept(.kind = TOK_COMMA)));
+			skip_nl();
+		}
+		expect(.kind = TOK_RPAREN);
+		skip_nl();
+		expect(.kind = TOK_ASSIGN);
+		skip_nl();
+		ast *obj = node(AST_OBJNEW);
+		obj->tok = nm;
+		push(obj, parse_expression());              /* fields body */
+		ast *lam = node(AST_LAMBDA);
+		push(lam, params);
+		push(lam, obj);
+		ast *asn = node(AST_ASSIGN);
+		asn->tok = nm;
+		push(asn, lam);
+		g_no_tuple = save;
+		return asn;
+	}
+
+	/* method NAME.MNAME = body : attach a method to class NAME. */
+	if (peek(.kind = TOK_ID, .string = "method")
+	 && _match((struct obj){ .kind = TOK_ID },     cur + 1)
+	 && _match((struct obj){ .kind = TOK_DOT },    cur + 2)
+	 && _match((struct obj){ .kind = TOK_ID },     cur + 3)
+	 && _match((struct obj){ .kind = TOK_ASSIGN }, cur + 4)) {
+		tok_advance();                              /* 'method' */
+		token *cname = expect(.kind = TOK_ID);
+		expect(.kind = TOK_DOT);
+		token *mname = expect(.kind = TOK_ID);
+		skip_nl();
+		expect(.kind = TOK_ASSIGN);
+		skip_nl();
+		ast *cid = node(AST_ID);
+		cid->tok = cname;
+		ast *md = node(AST_METHODDEF);
+		md->tok = mname;
+		push(md, cid);
+		push(md, parse_expression());               /* the method (a lambda) */
+		g_no_tuple = save;
+		return md;
+	}
 
 	if (peek(.kind = TOK_ID) && sig_from(cur + 1) == TOK_ASSIGN) {
 		ast *a = node(AST_ASSIGN);

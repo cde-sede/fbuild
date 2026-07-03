@@ -27,6 +27,9 @@ typedef enum {
 	AST_NOT,        /* tok = "not", kids[0]=operand               */
 	AST_MORPHISM,   /* tok = "//", kids[0]=left, [1]=right         */
 
+	AST_OBJNEW,     /* tok = class name, kids[0] = fields body; tags obj */
+	AST_METHODDEF,  /* tok = method name, kids[0]=class id, kids[1]=body */
+
 	AST_CALL,       /* kids[0]=callee, kids[1..]=args              */
 	AST_FIELD,      /* tok = field id/int, kids[0]=base;            */
 	                /* dynamic ".{expr}": tok=NULL, kids[1]=index   */

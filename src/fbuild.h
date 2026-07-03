@@ -33,6 +33,7 @@ typedef enum {
 	FB_CMD,
 	FB_MAP,
 	FB_LAMBDA,
+	FB_OBJECT,
 	FB_OTHER,
 } fb_Kind;
 
@@ -96,6 +97,19 @@ const char *fb_error_msg(fb_State *S);
 
 /* Read a top-level def by name after a successful run (nil if absent). */
 fb_Value  fb_global(fb_State *S, const char *name);
+
+/* ---- custom objects (classes + methods) ------------------------------- */
+/* A class is a nominal tag plus a method table; an object carries its class,
+ * a field map (build with fb_set / read with fb_field / fb_key), and optional
+ * opaque native data. Methods are called from the language as `obj.name(args)`,
+ * dispatched to the registered fb_CFunction with the object as the first (self)
+ * argument. The language `type`/`method` forms build on the same machinery. */
+typedef struct fb_class *fb_Class;
+
+fb_Class fb_class (fb_State *S, const char *name);   /* find or create a class */
+void     fb_method(fb_State *S, fb_Class c, const char *name, fb_CFunction fn);
+fb_Value fb_object(fb_State *S, fb_Class c, void *data); /* instance + native data */
+void    *fb_object_data(fb_Value obj);               /* the native data (or NULL) */
 
 /* ---- plugins ---------------------------------------------------------- */
 /* dlopen a plugin shared object and let it register builtins. The plugin must
