@@ -23,9 +23,9 @@ TARGETS  = opts.rest
 EXE    = [fbuild]
 SRCS   = glob([src/*.c])
 OBJS   = SRCS |> f -> path([build], cat(stem(f), '.o'))
-HDRS   = concat(glob([src/*.h]), glob([cgen/cds_lib/*.h]), glob([cgen/*.h]))
+HDRS   = concat(glob([src/*.h]), glob([cds-lib/cds_lib/*.h]), glob([cds-lib/*.h]))
 CC     = 'cc'
-CFLAGS = '-ggdb', '-Icgen', '-Wall', '-Wextra', '-O2', '-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0'
+CFLAGS = '-ggdb', '-Icds-lib', '-Wall', '-Wextra', '-O2', '-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0'
 log    = l, m -> print(cat('[', l, '] ', m))
 
 compile = o, s -> `{CC} {...CFLAGS} -c {...s} -o {.o}`

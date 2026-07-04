@@ -8,14 +8,14 @@ FORCE = opts.force
 
 RAYLIB = cat(env('HOME'), '/projects/raylib/src')
 CC     = 'cc'
-CFLAGS = '-I../src', '-I../cgen', cat('-I', RAYLIB), '-O2', '-Wall'
+CFLAGS = '-I../src', '-I../cds-lib', cat('-I', RAYLIB), '-O2', '-Wall'
 LDLIBS = '../libfbuild.a', cat(RAYLIB, '/libraylib.a'),
          '-lGL', '-lm', '-lpthread', '-ldl', '-lrt', '-lX11'
 
 EXE  = [gfx-auto]
 SRCS = [app.c], [raylib_gen.c]
 OBJS = SRCS |> f -> path([build], cat(stem(f), '.o'))
-HDRS = concat(glob([../src/*.h]), glob([../cgen/cds_lib/*.h]))
+HDRS = concat(glob([../src/*.h]), glob([../cds-lib/cds_lib/*.h]))
 
 log     = l, m -> print(cat('[', l, '] ', m))
 compile = o, s -> `{CC} {...CFLAGS} -c {...s} -o {.o}` when stale(.o, ...s, ...HDRS) or FORCE

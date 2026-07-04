@@ -1,4 +1,4 @@
-/* Executor: a tree-walking interpreter that runs the build through the cgen
+/* Executor: a tree-walking interpreter that runs the build through the cds-lib
  * runtime (cds_lib/build.h + connex.h + subst.c).
  *
  * The earlier stages stay lazy/symbolic; this one forces values and causes
@@ -11,7 +11,7 @@
 
 #define _GNU_SOURCE
 
-/* cgen runtime preamble (mirrors cgen/build.c) */
+/* cds-lib runtime preamble (mirrors cds-lib/build.c) */
 #define BUILD_DA_GENERIC_EXTRA(func)   \
     DA_DECL_GENERIC(char, func)        \
     DA_DECL_GENERIC(voidptr, func)     \
@@ -105,7 +105,7 @@ static rval RV_UNIT = { .k = RV_NONE };
 /* All runtime allocations come from the shared program arena (a_alloc / a_grow
  * / a_dup, declared in cparser.h, created by parser.c). Nothing is freed per
  * object. The only non-arena memory is libc-owned (open_memstream / realpath)
- * and the cgen dynamic-array argv, which keep their own malloc/free. */
+ * and the cds-lib dynamic-array argv, which keep their own malloc/free. */
 
 /* ---- helpers ---------------------------------------------------------- */
 
@@ -241,7 +241,7 @@ static t_env  g_env;
 static rval  *g_args;          /* the `args` builtin variable (List<String>) */
 static rval  *g_cwd;           /* the `cwd` builtin variable (String) */
 
-/* print/debug must not write while a run owns the terminal (the cgen runtime
+/* print/debug must not write while a run owns the terminal (the cds-lib runtime
  * is drawing the build graph). Output produced during a run is queued and
  * flushed once the event loop finishes. */
 static int    g_in_run;
@@ -1996,7 +1996,7 @@ static rval *call_builtin1(const char *n, rval *a) {
 
 /* ---- command collection + execution ----------------------------------- */
 
-/* append every command reachable from v into the cgen t_cmd (argv list with a
+/* append every command reachable from v into the cds-lib t_cmd (argv list with a
  * NULL after each command, as CMD() produces). */
 static void collect(rval *v, t_cmd *cmds) {
 	if (!v) return;
@@ -2042,7 +2042,7 @@ static int has_cmd(rval *v) {
 
 /* build_parallel_run reuses get_current_loop(); exec runs inside a coroutine
  * parked on the main loop, so run parallel on its own loop instead (from
- * cgen/build.c). */
+ * cds-lib/build.c). */
 static int run_parallel_isolated(t_parallel_ctx *par, t_env env) {
 	t_loop *saved = coro_get_current_loop();
 	coro_set_current_loop(NULL);
@@ -2051,7 +2051,7 @@ static int run_parallel_isolated(t_parallel_ctx *par, t_env env) {
 	return rc;
 }
 
-/* execute a value, mirroring its structure onto the cgen runtime:
+/* execute a value, mirroring its structure onto the cds-lib runtime:
  *   RV_SEQ        -> a GROUP whose children run in order (>> dependency)
  *   RV_LIST/TUPLE -> a PARALLEL group of independent items
  *   RV_CMD        -> a GROUP running the single command
@@ -2098,7 +2098,7 @@ static void exec_run(rval *v) {
 }
 
 /* run the whole tree inside one coroutine on one event loop, mirroring
- * cgen/build.c: nested GROUP/PARALLEL only render correctly when driven from a
+ * cds-lib/build.c: nested GROUP/PARALLEL only render correctly when driven from a
  * coroutine parked on a single loop. */
 CORO_DEF(run_coro, args, { rval *root; })
 {

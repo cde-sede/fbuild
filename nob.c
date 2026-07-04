@@ -2,7 +2,7 @@
 #include "nob.h"
 
 /* bootstrap: cc -o nob nob.c   then   ./nob
- * language sources live in src/; cgen is the symlinked runtime (-Icgen).
+ * language sources live in src/; cds-lib is the symlinked runtime (-Icds-lib).
  *
  * Builds three artifacts:
  *   libfbuild.a / libfbuild.so   the interpreter as a library (no main)
@@ -16,13 +16,13 @@ static const char *lib_src[] = {
 /* headers: any change forces a full rebuild (nob can't see #include deps) */
 static const char *hdrs[] = {
 	"src/cparser.h", "src/ast.h", "src/graph.h", "src/fbuild.h",
-	"cgen/cds_lib/build.h",
+	"cds-lib/cds_lib/build.h",
 };
 
 static int compile(const char *src, const char *obj) {
 	Nob_Cmd cmd = {0};
 	nob_cc(&cmd);
-	nob_cmd_append(&cmd, "-ggdb", "-Icgen", "-fPIC");
+	nob_cmd_append(&cmd, "-ggdb", "-Icds-lib", "-fPIC");
 	nob_cc_flags(&cmd);
 	nob_cmd_append(&cmd, "-c", src, "-o", obj);
 	return nob_cmd_run_sync_and_reset(&cmd);
@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
 	{
 		Nob_Cmd cmd = {0};
 		nob_cc(&cmd);
-		nob_cmd_append(&cmd, "-Icgen", "-rdynamic");   /* export fb_* for plugins */
+		nob_cmd_append(&cmd, "-Icds-lib", "-rdynamic");   /* export fb_* for plugins */
 		nob_cc_output(&cmd, "fbuild");
 		nob_cmd_append(&cmd, "build/main.c.o", "libfbuild.a", "-ldl");
 		if (!nob_cmd_run_sync_and_reset(&cmd)) return 1;

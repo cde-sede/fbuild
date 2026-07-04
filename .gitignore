@@ -15,8 +15,6 @@ cg.out
 cg.log
 midx
 
-# local runtime symlink (replaced by the cds-lib submodule)
-/cgen
 
 # graphical example: build outputs + generated bindings
 graphical/build/

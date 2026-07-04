@@ -33,7 +33,7 @@ int main(void) {
 Build (static):
 
 ```sh
-cc -Isrc -Icgen host.c libfbuild.a -o host
+cc -Isrc -Icds-lib host.c libfbuild.a -o host
 ```
 
 Add `-rdynamic -ldl` if the host also loads plugins (so a plugin can resolve the

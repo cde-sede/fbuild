@@ -50,7 +50,7 @@ Build it (position-independent, shared; the `fb_*` symbols resolve from the
 `fbuild` executable at load time, which is why `fbuild` is linked `-rdynamic`):
 
 ```sh
-cc -fPIC -shared -Isrc -Icgen shout.c -o shout.so
+cc -fPIC -shared -Isrc -Icds-lib shout.c -o shout.so
 ```
 
 ## Loading

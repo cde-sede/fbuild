@@ -1,0 +1,3 @@
+[submodule "cds-lib"]
+	path = cds-lib
+	url = git@github.com:cde-sede/cds-lib.git
