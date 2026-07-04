@@ -1,0 +1,181 @@
+================================================================================
+assignment with call and path glob
+================================================================================
+
+SRC = glob([src/*.c])
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (expression
+      (assignment
+        name: (identifier)
+        value: (expression
+          (postfix_expression
+            (identifier)
+            (call_suffix
+              (argument_list
+                (path)))))))))
+
+================================================================================
+pipe, lambda, command, interpolation, guard
+================================================================================
+
+BUILD = PAIRS |> (.src, .obj -> `gcc -c {.src} -o {.obj}` when stale(.src, .obj))
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (expression
+      (assignment
+        name: (identifier)
+        value: (expression
+          (pipe_expression
+            (identifier)
+            (expression
+              (lambda
+                (parameter_list
+                  (parameter (projection (identifier)))
+                  (parameter (projection (identifier))))
+                body: (expression
+                  (guarded_expression
+                    (command
+                      (command_word)
+                      (command_word)
+                      (interpolation (expression (projection (identifier))))
+                      (command_word)
+                      (interpolation (expression (projection (identifier)))))
+                    (when_clause
+                      (expression
+                        (postfix_expression
+                          (identifier)
+                          (call_suffix
+                            (argument_list
+                              (projection (identifier))
+                              (projection (identifier)))))))))))))))))
+
+================================================================================
+morphism and sequence
+================================================================================
+
+OBJ = SRC |> [*.c] // [*.o]
+ALL = BUILD >> LINK
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (expression
+      (assignment
+        name: (identifier)
+        value: (expression
+          (pipe_expression
+            (identifier)
+            (postfix_expression
+              (path)
+              (morphism_suffix (path))))))))
+  (statement
+    (expression
+      (assignment
+        name: (identifier)
+        value: (expression
+          (sequence_expression
+            (identifier)
+            (identifier)))))))
+
+================================================================================
+constructor vs comparison
+================================================================================
+
+x = a < b
+y = Foo<a = 1, *bar>
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (expression
+      (assignment
+        name: (identifier)
+        value: (expression
+          (comparison_expression
+            (identifier)
+            (compare_op)
+            (identifier))))))
+  (statement
+    (expression
+      (assignment
+        name: (identifier)
+        value: (expression
+          (postfix_expression
+            (identifier)
+            (constructor_suffix
+              (constructor_fields
+                (constructor_field
+                  name: (identifier)
+                  value: (number (integer)))
+                (constructor_field
+                  (identifier))))))))))
+
+================================================================================
+where bindings with trailing when
+================================================================================
+
+z = m where a = 1, b = 2 when c
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (expression
+      (assignment
+        name: (identifier)
+        value: (expression
+          (guarded_expression
+            (identifier)
+            (where_clause
+              (bindings
+                (binding name: (identifier) value: (number (integer)))
+                (binding name: (identifier) value: (number (integer)))))
+            (when_clause
+              (expression (identifier)))))))))
+
+================================================================================
+custom object type and method
+================================================================================
+
+type Point(x) = { "x": x }
+method Point.get = self -> self.x
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (type_definition
+      name: (identifier)
+      (parameter_list
+        (parameter
+          (identifier)))
+      value: (expression
+        (map
+          (map_entry
+            key: (string
+              (string_content_dq))
+            value: (identifier))))))
+  (statement
+    (method_definition
+      type: (identifier)
+      name: (identifier)
+      value: (expression
+        (lambda
+          (parameter_list
+            (parameter
+              (identifier)))
+          body: (expression
+            (postfix_expression
+              (identifier)
+              (field_suffix
+                (field
+                  (identifier))))))))))

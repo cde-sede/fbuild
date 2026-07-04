@@ -8,3 +8,25 @@
 # nob bootstrap
 /nob
 /nob.old
+
+# profiling / scratch
+callgrind.out.*
+cg.out
+cg.log
+midx
+
+# local runtime symlink (replaced by the cds-lib submodule)
+/cgen
+
+# graphical example: build outputs + generated bindings
+graphical/build/
+graphical/gfx-auto
+graphical/gfx
+graphical/compile_commands.json
+graphical/raylib_gen.c
+graphical/*.png
+
+# tree-sitter generated / built
+tree-sitter-funcbuild/funcbuild.so
+tree-sitter-funcbuild/src/
+tree-sitter-funcbuild/node_modules/

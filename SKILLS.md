@@ -33,8 +33,13 @@ true  false                            Bool literals
 and or                 Bool -> Bool -> Bool
 ||                     a -> b -> (a|b)   value-or: left if truthy else right
 not                    Bool -> Bool
-where / when           guards
+where : e where n = v, ...   local bindings for e (let); sequential (later see earlier)
+when  : e when cond          gate: e if cond else () (unit, falsy)
 ```
+Guard tail on an expression: `e where <binds> when <cond>` (where first, so the
+`when` can use the bindings). `where` names things; `when` gates the whole thing.
+Common if/else idiom (since `when` yields `()` when false):
+`x = (a when cond) || b`  — a if cond else b.
 
 ## construct
 

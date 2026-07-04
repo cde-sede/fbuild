@@ -1,0 +1,19 @@
+# 110 = 0b01101110, indexed by neighbourhood n = 4*left + 2*center + right:
+#   n: 0 1 2 3 4 5 6 7
+#   b: 0 1 1 1 0 1 1 0
+RULE = 0, 1, 1, 1, 0, 1, 1, 0
+
+W = 48           # row width
+G = 32           # generations to show
+
+RANGE = n -> (...(RANGE(n - 1) when n > 1), n - 1)
+
+STEP = row -> RANGE(W) |> i ->
+    RULE.{4 * row.{i - 1} + 2 * row.{i} + row.{i + 1}}
+
+CELL = c -> cat(('#' when c == 1), (' ' when c == 0))
+LINE = row -> print(join(row |> c -> CELL(c), ''))
+
+SEED = RANGE(W) |> i -> (1 when i == W - 2) + 0
+CA   = row, n -> (LINE(row), CA(STEP(row), n - 1)) when n > 0
+CA(SEED, G)
