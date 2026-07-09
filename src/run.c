@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.16"
+#define FBUILD_VERSION "0.1.17"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -2574,7 +2574,7 @@ static rval *eval(ast *n, renv *e) {
 					rv_push(out, apply_scratch(fn, acc->items[j]));
 				acc = out;
 			} else {
-				acc = apply(fn, acc);
+				acc = apply_scratch(fn, acc);   /* scalar pipe: reclaim temps */
 			}
 		}
 		return acc;
