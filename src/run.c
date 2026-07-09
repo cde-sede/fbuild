@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.12"
+#define FBUILD_VERSION "0.1.13"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -281,15 +281,21 @@ static rval *do_pkgconfig(const char *name);
  * `when` guard is false (so `(...RANGE(n-1) when n>0, n)` collapses cleanly). */
 static void tuple_add(rval *t, ast *el, renv *e) {
 	if (el->kind == AST_GUARD) {
-		renv ge = { .parent = e, .arg = cur_arg(e) };
 		ast *where = el->kids[1];
 		ast *whenc = el->kids[2];
-		if (where)
+		/* arena-allocate the where-scope: a bound value may be a lambda or a
+		 * deferred `>>` that captures this env and outlives this frame. */
+		renv *bsc = e;
+		if (where) {
+			renv *ge = a_alloc(sizeof *ge);
+			ge->parent = e;
+			ge->arg    = cur_arg(e);
 			for (size_t i = 0; i < where->nkids; i++) {
 				ast *bd = where->kids[i];
-				env_put(&ge, bd->tok, eval(bd->kids[0], &ge));
+				env_put(ge, bd->tok, eval(bd->kids[0], ge));
 			}
-		renv *bsc = where ? &ge : e;
+			bsc = ge;
+		}
 		if (whenc) {
 			rval *c = eval(whenc->kids[0], bsc);
 			if (!(c->k == RV_BOOL && c->i))     /* gated out */
@@ -506,8 +512,10 @@ static rval *do_glob(const char *pat) {
 	char *dup = a_dup(pat);
 	char *comps[64];
 	size_t nc = 0;
-	for (char *t = strtok(dup, "/"); t && nc < 64; t = strtok(NULL, "/"))
+	char *t = strtok(dup, "/");
+	for (; t && nc < 64; t = strtok(NULL, "/"))
 		comps[nc++] = t;
+	if (t) fprintf(stderr, "warning: glob '%s' has >64 path components; truncated\n", pat);
 	glob_walk(pat[0] == '/' ? "/" : "", comps, nc, 0, list);
 	return list;
 }
@@ -624,7 +632,7 @@ static rval *call_builtin1(const char *name, rval *arg);  /* defined below */
  * matching the single-threaded coroutine model). Declared before apply()
  * because apply dispatches native callables (RV_CFUN) through g_active. */
 struct fb_class;
-#define FB_MAX_REG 1024   /* core builtins + host/plugin (full raylib ~660) */
+#define FB_MAX_REG 10240   /* core builtins + host/plugin (full raylib ~660) */
 
 typedef struct {
 	def    defs[512]; size_t ndefs;
@@ -653,9 +661,13 @@ static rval *apply(rval *fn, rval *arg) {
 	if (!fn) return &RV_UNIT;
 	if (fn->k == RV_BUILTIN) return call_builtin1(fn->s, arg);
 	if (fn->k == RV_LAMBDA) {
-		renv e = { .parent = fn->env };
-		bind_params(&e, fn->params, arg);
-		return eval(fn->body, &e);
+		/* arena-allocate the call frame: the body may return a lambda or a
+		 * deferred `>>` sequence that captures this env (v->env) and outlives
+		 * this stack frame -- a stack renv would dangle (use-after-return). */
+		renv *e = a_alloc(sizeof *e);
+		e->parent = fn->env;
+		bind_params(e, fn->params, arg);
+		return eval(fn->body, e);
 	}
 	if (fn->k == RV_MORPH) {
 		if (arg->k != RV_FILE) return &RV_UNIT;
@@ -2409,15 +2421,21 @@ static rval *eval(ast *n, renv *e) {
 	}
 
 	case AST_GUARD: {
-		renv ge = { .parent = e, .arg = cur_arg(e) };
 		ast *where = n->kids[1];
 		ast *whenc = n->kids[2];
-		if (where)
+		/* arena-allocate the where-scope: a bound value may be a lambda or a
+		 * deferred `>>` that captures this env and outlives this frame. */
+		renv *bsc = e;
+		if (where) {
+			renv *ge = a_alloc(sizeof *ge);
+			ge->parent = e;
+			ge->arg    = cur_arg(e);
 			for (size_t i = 0; i < where->nkids; i++) {
 				ast *bd = where->kids[i];
-				env_put(&ge, bd->tok, eval(bd->kids[0], &ge));
+				env_put(ge, bd->tok, eval(bd->kids[0], ge));
 			}
-		renv *bsc = where ? &ge : e;
+			bsc = ge;
+		}
 		if (whenc) {
 			rval *c = eval(whenc->kids[0], bsc);
 			if (!(c->k == RV_BOOL && c->i))    /* gate */

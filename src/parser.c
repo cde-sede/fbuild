@@ -159,8 +159,15 @@ void tok_free(token *t)            { (void)t; }
 void parser_free(struct parser *pp) { (void)pp; }
 
 void emit(int kind, char *str, size_t len, int sl, int sc, int el, int ec) {
-	if (p->pos >= MAX_TOKENS)
+	if (p->pos >= MAX_TOKENS) {
+		static int warned = 0;        /* warn once, then keep dropping */
+		if (!warned) {
+			warned = 1;
+			fprintf(stderr, "error: script exceeds MAX_TOKENS (%d); "
+			                "tokens dropped, parse will be incomplete\n", MAX_TOKENS);
+		}
 		return;
+	}
 	p->tokens[p->pos++] = (token){
 		.kind = kind, .start = {sc, sl}, .end = {ec, el},
 		.string = str, .len = len};
