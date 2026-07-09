@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.15"
+#define FBUILD_VERSION "0.1.16"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -262,6 +262,12 @@ static size_t g_print_n, g_print_cap;
 /* line must be arena-owned (see do_print). */
 static void print_emit(char *line) {
 	if (g_in_run) {
+		/* The queue is flushed after the run, but a run step may execute inside
+		 * a scratch region (reclaimed >> step). Keep both the queue and each
+		 * line in the durable arena so a scratch pop can't dangle them. */
+		void *cur = arena_current();
+		arena_use(g_main);
+		if (arena_owns(g_scratch, line)) line = a_dup(line);
 		if (g_print_n == g_print_cap) {
 			size_t nc = g_print_cap ? g_print_cap * 2 : 8;
 			g_print_q = a_grow(g_print_q, g_print_n * sizeof *g_print_q,
@@ -269,6 +275,7 @@ static void print_emit(char *line) {
 			g_print_cap = nc;
 		}
 		g_print_q[g_print_n++] = line;
+		arena_use(cur);
 	} else {
 		fputs(line, stdout);
 		fputc('\n', stdout);
@@ -433,7 +440,14 @@ static rval *def_lookup(token *name) {
 			if (d->doing) fatal("cyclic definition '%.*s'",
 			                    (int)name->len, name->string);
 			d->doing = 1;
+			/* A def is program-lifetime and may be memoized, so force it in the
+			 * durable arena even when the reference happens inside a scratch
+			 * region (e.g. a |> element): a scratch-allocated value would be
+			 * freed at the next pop and dangle on the next lookup. */
+			void *cur = arena_current();
+			arena_use(g_main);
 			rval *v = eval(d->rhs, &g_top);
+			arena_use(cur);
 			d->doing = 0;
 			if (v && !v->label)
 				v->label = dup_tok(name);           /* group label */
@@ -452,7 +466,10 @@ static rval *def_force(token *name) {
 			if (d->doing) fatal("cyclic definition '%.*s'",
 			                    (int)name->len, name->string);
 			d->doing = 1;
+			void *cur = arena_current();          /* force durably (see def_lookup) */
+			arena_use(g_main);
 			rval *v = eval(d->rhs, &g_top);
+			arena_use(cur);
 			d->doing = 0;
 			if (v && !v->label) v->label = dup_tok(name);
 			return v;
@@ -769,6 +786,24 @@ static rval *apply(rval *fn, rval *arg) {
 		return (rval *)f(g_active, (fb_Value *)one, 1);
 	}
 	return &RV_UNIT;
+}
+
+/* apply fn to arg inside a scratch mark, promoting the result to the durable
+ * arena and reclaiming the call's temporaries. Use in per-element loops where
+ * only the (promoted) result is kept. No-op wrapper when there's no scratch or
+ * we're already nested in one (the outer frame owns that reclamation). Caller
+ * must be in the durable arena. */
+static rval *apply_scratch(rval *fn, rval *arg) {
+	if (!g_scratch || arena_current() == g_scratch)
+		return apply(fn, arg);
+	void  *durable = arena_current();
+	size_t mark    = arena_pos(g_scratch);
+	arena_use(g_scratch);
+	rval *r = apply(fn, arg);
+	arena_use(durable);
+	r = rv_clone(r);
+	arena_reset_to(g_scratch, mark);
+	return r;
 }
 
 /* ============================================================================
@@ -1297,8 +1332,8 @@ static rval *do_filter(rval *list, rval *fn) {
 	rval *out = rv(RV_LIST);
 	if (!is_seq(list)) return out;
 	for (size_t i = 0; i < list->n; i++)
-		if (truthy(apply(fn, list->items[i])))
-			rv_push(out, list->items[i]);
+		if (truthy(apply_scratch(fn, list->items[i])))   /* predicate temps reclaimed */
+			rv_push(out, list->items[i]);                /* kept item is durable */
 	return out;
 }
 
@@ -1436,9 +1471,17 @@ static rval *do_slice(rval *list, long s, long e) {  /* list[s:e], neg from end 
 static rval *do_index(rval *list, rval *val, rval *key) {
 	if (!is_seq(list)) return rv_int(-1);
 	const char *s = as_cstr(val);
+	int scr = key && g_scratch && arena_current() != g_scratch;
 	for (size_t i = 0; i < list->n; i++) {
+		/* key result is consumed immediately (compared), never kept: evaluate
+		 * it in scratch and drop it -- no promotion needed. */
+		void  *durable = arena_current();
+		size_t mark    = scr ? arena_pos(g_scratch) : 0;
+		if (scr) arena_use(g_scratch);
 		rval *e = key ? apply(key, list->items[i]) : list->items[i];
-		if (!strcmp(as_cstr(e), s)) return rv_int((long)i);
+		int match = !strcmp(as_cstr(e), s);
+		if (scr) { arena_use(durable); arena_reset_to(g_scratch, mark); }
+		if (match) return rv_int((long)i);
 	}
 	return rv_int(-1);
 }
@@ -2172,6 +2215,10 @@ static void exec_run(rval *v) {
 
 	switch (v->k) {
 	case RV_SEQ:                            /* deferred: eval each step late */
+		/* No scratch reclamation here: the runtime executes commands
+		 * asynchronously (exec_run schedules onto the event loop and returns
+		 * before children finish), so the argv strings must stay live past this
+		 * scope -- popping a scratch per step would free them mid-run. */
 		GROUP_NAMED(label) {
 			ast *seqn = v->body;
 			for (size_t i = 0; i < seqn->nkids; i++)
@@ -2522,26 +2569,9 @@ static rval *eval(ast *n, renv *e) {
 		for (size_t i = 1; i < n->nkids; i++) {
 			rval *fn = eval(n->kids[i], e);
 			if (is_seq(acc)) {                 /* map element-wise */
-				rval *out = rv(RV_LIST);
-				/* Reclaim per-element temporaries: evaluate each element in
-				 * the scratch arena, promote its result to the durable arena
-				 * (out lives there), then pop the scratch. Skip when already
-				 * inside a scratch region (nested |>): the outer frame owns the
-				 * reclamation, and re-marking would pop data still in use. */
-				int reclaim = g_scratch && arena_current() != g_scratch;
-				for (size_t j = 0; j < acc->n; j++) {
-					if (reclaim) {
-						void  *durable = arena_current();
-						size_t mark    = arena_pos(g_scratch);
-						arena_use(g_scratch);
-						rval *r = apply(fn, acc->items[j]);
-						arena_use(durable);
-						rv_push(out, rv_clone(r));   /* promote to durable */
-						arena_reset_to(g_scratch, mark);
-					} else {
-						rv_push(out, apply(fn, acc->items[j]));
-					}
-				}
+				rval *out = rv(RV_LIST);       /* durable; items promoted in */
+				for (size_t j = 0; j < acc->n; j++)
+					rv_push(out, apply_scratch(fn, acc->items[j]));
 				acc = out;
 			} else {
 				acc = apply(fn, acc);
