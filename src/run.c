@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.14"
+#define FBUILD_VERSION "0.1.15"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -242,6 +242,14 @@ static rval  *g_args;          /* the `args` builtin variable (List<String>) */
 static rval  *g_cwd;           /* the `cwd` builtin variable (String) */
 static rval  *g_globals;       /* `_GLOBALS`: per-state mutable store (RV_MAP)  */
 static rval  *g_shared;        /* `_SHARED`: process-global store, NOT snapshot */
+/* Two-arena model: g_main holds durable data (parse tree, top-level defs, the
+ * stores, promoted results); g_scratch holds per-iteration temporaries that are
+ * reclaimed after each element. Both point into the active state. During an
+ * iteration the current arena (what a_alloc targets) is switched to g_scratch;
+ * results are promoted back to g_main with rv_clone before the scratch is
+ * popped. Set by fb_activate. */
+static void  *g_main;
+static void  *g_scratch;
 
 /* print/debug must not write while a run owns the terminal (the cds-lib runtime
  * is drawing the build graph). Output produced during a run is queued and
@@ -289,6 +297,70 @@ static rval *store_globals(void) {
 static rval *store_shared(void) {
 	if (!g_shared) g_shared = rv(RV_MAP);   /* NOTE: in the creating state's arena */
 	return g_shared;
+}
+
+/* --- generational promotion (scratch -> durable) ---------------------------
+ * rv_clone deep-copies the parts of `v` that live in the scratch arena into the
+ * CURRENT arena (callers set it to g_main first), sharing any node that is
+ * already durable. So promoting an iteration result copies only the fresh
+ * temporaries; references to top-level defs / globals are shared, not
+ * duplicated. env_clone does the same for a closure's captured frames: the
+ * per-call frame (in scratch) is copied, the enclosing global frames shared,
+ * which is what keeps closures escaping a loop cheap and, more importantly,
+ * valid after the scratch is popped. A value already durable clones to itself. */
+static rval *rv_clone(rval *v);
+
+static char *str_promote(char *s) {   /* dup a string only if it's scratch-owned */
+	return (s && arena_owns(g_scratch, s)) ? a_dup(s) : s;
+}
+
+static renv *env_clone(renv *e) {
+	if (!e || !arena_owns(g_scratch, e)) return e;   /* durable frame: share */
+	renv *c = a_alloc(sizeof *c);
+	c->arg    = rv_clone(e->arg);
+	c->parent = env_clone(e->parent);
+	c->head   = NULL;
+	struct rbind **tail = &c->head;                  /* preserve binding order */
+	for (struct rbind *b = e->head; b; b = b->next) {
+		struct rbind *nb = a_alloc(sizeof *nb);
+		nb->name = b->name;                          /* token: permanent arena */
+		nb->val  = rv_clone(b->val);
+		nb->next = NULL;
+		*tail = nb; tail = &nb->next;
+	}
+	return c;
+}
+
+static rval *rv_clone(rval *v) {
+	if (!v || !arena_owns(g_scratch, v)) return v;   /* durable / NULL: share */
+	rval *c = rv(v->k);
+	*c = *v;                                         /* shallow, then fix owned */
+	c->label = str_promote(c->label);
+	switch (v->k) {
+	case RV_STR: case RV_FILE: case RV_BUILTIN:
+		c->s = str_promote(v->s);
+		break;
+	case RV_LIST: case RV_TUPLE: case RV_CMD:
+		c->items = NULL; c->n = 0; c->cap = 0;
+		for (size_t i = 0; i < v->n; i++) rv_push(c, rv_clone(v->items[i]));
+		break;
+	case RV_MAP: case RV_OBJECT:
+		c->items = NULL; c->keys = NULL; c->n = 0; c->cap = 0;
+		for (size_t i = 0; i < v->n; i++)
+			map_set(c, str_promote(v->keys[i]), rv_clone(v->items[i]));
+		/* cls (registry) and nat (host data) are durable/shared as-is */
+		break;
+	case RV_LAMBDA: case RV_THUNK:
+		c->env = env_clone(v->env);   /* params/body AST live in permanent arena */
+		break;
+	case RV_MORPH:
+		c->from = str_promote(v->from);
+		c->to   = str_promote(v->to);
+		break;
+	default:                          /* RV_INT/BOOL/NONE etc: shallow copy ok */
+		break;
+	}
+	return c;
 }
 static rval *do_pkgconfig(const char *name);
 
@@ -666,7 +738,8 @@ struct fb_State {
 	char      err_msg[512];
 	int       argc;         /* args handed to the script (fb_set_args)     */
 	char    **argv;
-	void     *arena;        /* this interpreter's allocation arena         */
+	void     *arena;        /* this interpreter's durable arena (g_main)   */
+	void     *scratch;      /* per-iteration scratch arena (reclaimed)     */
 	fb_globals snap;        /* globals held while this state is inactive   */
 };
 static struct fb_State *g_active;   /* the interpreter whose globals are live */
@@ -2365,11 +2438,17 @@ static rval *eval(ast *n, renv *e) {
 		rval *base = eval(lv->kids[0], e);
 		if (!base || (base->k != RV_MAP && base->k != RV_OBJECT))
 			return (rval *)fb_error(g_active, "<- target base is not a map");
-		char *key = (!lv->tok && lv->nkids == 2)   /* dynamic ".{expr}" */
-		          ? a_dup(as_cstr(eval(lv->kids[1], e)))
-		          : dup_tok(lv->tok);
-		map_set(base, key, rhs);
-		return rhs;
+		const char *ks = (!lv->tok && lv->nkids == 2)   /* dynamic ".{expr}" */
+		               ? as_cstr(eval(lv->kids[1], e)) : NULL;
+		/* The store outlives the current scope, so commit key + value into the
+		 * durable arena -- a scratch-allocated rhs would dangle after a pop. */
+		void *cur = arena_current();
+		arena_use(g_main);
+		char *key   = ks ? a_dup(ks) : dup_tok(lv->tok);
+		rval *stored = rv_clone(rhs);
+		map_set(base, key, stored);
+		arena_use(cur);
+		return stored;
 	}
 
 	case AST_FORCE: {
@@ -2444,8 +2523,25 @@ static rval *eval(ast *n, renv *e) {
 			rval *fn = eval(n->kids[i], e);
 			if (is_seq(acc)) {                 /* map element-wise */
 				rval *out = rv(RV_LIST);
-				for (size_t j = 0; j < acc->n; j++)
-					rv_push(out, apply(fn, acc->items[j]));
+				/* Reclaim per-element temporaries: evaluate each element in
+				 * the scratch arena, promote its result to the durable arena
+				 * (out lives there), then pop the scratch. Skip when already
+				 * inside a scratch region (nested |>): the outer frame owns the
+				 * reclamation, and re-marking would pop data still in use. */
+				int reclaim = g_scratch && arena_current() != g_scratch;
+				for (size_t j = 0; j < acc->n; j++) {
+					if (reclaim) {
+						void  *durable = arena_current();
+						size_t mark    = arena_pos(g_scratch);
+						arena_use(g_scratch);
+						rval *r = apply(fn, acc->items[j]);
+						arena_use(durable);
+						rv_push(out, rv_clone(r));   /* promote to durable */
+						arena_reset_to(g_scratch, mark);
+					} else {
+						rv_push(out, apply(fn, acc->items[j]));
+					}
+				}
 				acc = out;
 			} else {
 				acc = apply(fn, acc);
@@ -2971,13 +3067,16 @@ static void fb_activate(struct fb_State *S) {
 	if (g_active) fb_gsave(g_active);
 	g_active = S;
 	fb_gload(S);
+	g_main    = S->arena;
+	g_scratch = S->scratch;
 	arena_use(S->arena);
 }
 
 fb_State *fb_new(void) {
 	struct fb_State *S = calloc(1, sizeof *S);
 	if (!S) { fprintf(stderr, "out of memory\n"); exit(1); }
-	S->arena = arena_new();
+	S->arena   = arena_new();
+	S->scratch = arena_new();
 	fb_activate(S);   /* loads S's (zeroed) globals + points the arena at S */
 	fb_init();        /* register core builtins into S's registry */
 	return S;
@@ -2985,6 +3084,7 @@ fb_State *fb_new(void) {
 
 void fb_close(fb_State *S) {
 	build_ui_cleanup();                    /* release the shared draw buffer */
+	arena_free(S->scratch);
 	arena_free(S->arena);
 	if (g_active == S) g_active = NULL;   /* live globals now dangle until next activate */
 	free(S);

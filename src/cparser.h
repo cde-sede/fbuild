@@ -17,6 +17,11 @@ void  arena_fini(void);
 void *arena_new(void);
 void  arena_use(void *arena);
 void  arena_free(void *arena);
+void *arena_current(void);
+/* introspection for scratch reclamation (generational rv_clone) */
+int    arena_owns(void *arena, const void *p);
+size_t arena_pos(void *arena);
+void   arena_reset_to(void *arena, size_t pos);
 void *a_alloc(size_t n);
 void *a_grow(void *old, size_t oldn, size_t newn);
 char *a_dup(const char *s);
