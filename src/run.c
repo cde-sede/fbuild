@@ -19,9 +19,16 @@
 #define BUILD_TAIL_LINES 5
 #define BUILD_IMPLEMENTATION
 
+/* Coroutine stack reservation (build runtime + run_coro). The mapping is
+ * anonymous and demand-paged, so this is virtual address space, not RSS --
+ * measured peak RSS is identical at 64K/512K/1M. Reserve generously so deep
+ * eval/exec_run/collect recursion during a run can't hit the fixed cap; the
+ * guard page still catches genuine overflow. */
+#define CORO_STACK_SIZE (512 * 1024)
+
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.17"
+#define FBUILD_VERSION "0.1.18"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
