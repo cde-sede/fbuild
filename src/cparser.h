@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-#define MAX_TOKENS 1024
+#define MAX_TOKENS 10240
 
 /* Program-lifetime arena (backed by cds_lib/build.h, implemented in run.c,
  * owned/created by parser.c). Every allocation in the front-end and the executor
@@ -55,6 +55,7 @@ typedef enum {
 	TOK_MORPH,      // //
 	TOK_SPLAT,      // ...
 	TOK_SEQ,        // >>  sequential
+	TOK_WRITE,      // <-  store into a _GLOBALS/_SHARED slot (mutation)
 
 	TOK_LT,
 	TOK_GT,

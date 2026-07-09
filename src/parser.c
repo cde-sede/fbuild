@@ -76,6 +76,7 @@ const char *kind_name[] = {
 	[TOK_MORPH]="TOK_MORPH",
 	[TOK_SPLAT]="TOK_SPLAT",
 	[TOK_SEQ]="TOK_SEQ",
+	[TOK_WRITE]="TOK_WRITE",
 
 	[TOK_LT]="TOK_LT",
 	[TOK_GT]="TOK_GT",

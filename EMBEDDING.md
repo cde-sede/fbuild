@@ -69,6 +69,33 @@ fb_close(a); fb_close(b);
 Values belong to the state that created them; read them back while that state is
 the one you're operating on (any call on it re-activates it).
 
+## Shared state (mutable stores)
+
+For host state the script should see or mutate between runs, use the built-in
+stores instead of C `static` slots. Two scopes:
+
+| Call | Store | Script name |
+|------|-------|-------------|
+| `fb_global_get/set(fb_State*, key, v)` | per-interpreter | `_GLOBALS` |
+| `fb_shared_get/set(fb_State*, key, v)` | process-global (all states + plugins) | `_SHARED` |
+
+Both are ordinary maps; `get` returns nil for a missing key. This is the
+supported replacement for the old "stash it in a `static fb_Value`" pattern —
+it survives across `fb_dofile` calls and is visible from the language.
+
+```c
+fb_global_set(S, "count", fb_int(S, 0));      /* host seeds a value  */
+fb_dofile(S, "build.fb");                      /* script does _GLOBALS.count <- ... */
+long c = fb_toint(fb_global_get(S, "count"));  /* host reads it back  */
+
+fb_shared_set(S, "theme", fb_str(S, "dark"));  /* every state/plugin sees _SHARED.theme */
+```
+
+Operate on the active state (call from inside a run, or after any call that
+activated it). `_GLOBALS` is saved/restored with its state; `_SHARED` is one map
+for the whole process. Store a value whose lifetime is at least the store's —
+`fb_int`/`fb_str`/… made on the active state are fine.
+
 ## Registering a host builtin
 
 A builtin is a C function that receives evaluated arguments and returns a value:

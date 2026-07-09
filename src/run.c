@@ -21,7 +21,7 @@
 
 /* embed a version string in the .my_metadata section via build.h's METADATA
  * mechanism; build_info.version is read back by fbuild_version(). */
-#define FBUILD_VERSION "0.1.13"
+#define FBUILD_VERSION "0.1.14"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 #include "cds_lib/build.h"
@@ -240,6 +240,8 @@ static renv   g_top;
 static t_env  g_env;
 static rval  *g_args;          /* the `args` builtin variable (List<String>) */
 static rval  *g_cwd;           /* the `cwd` builtin variable (String) */
+static rval  *g_globals;       /* `_GLOBALS`: per-state mutable store (RV_MAP)  */
+static rval  *g_shared;        /* `_SHARED`: process-global store, NOT snapshot */
 
 /* print/debug must not write while a run owns the terminal (the cds-lib runtime
  * is drawing the build graph). Output produced during a run is queued and
@@ -275,6 +277,19 @@ static void print_flush(void) {
 
 static rval *eval(ast *n, renv *e);
 static rval *do_shell(rval *v);
+
+/* Mutable stores backing `_GLOBALS`/`_SHARED` and the fb_global / fb_shared
+ * C API. Insertion-ordered maps, created on first use. Phase 1: values are
+ * stored by reference in the active arena (safe while the arena is permanent);
+ * a later phase gives these their own arena + deep-copy-on-write (rv_clone). */
+static rval *store_globals(void) {
+	if (!g_globals) g_globals = rv(RV_MAP);
+	return g_globals;
+}
+static rval *store_shared(void) {
+	if (!g_shared) g_shared = rv(RV_MAP);   /* NOTE: in the creating state's arena */
+	return g_shared;
+}
 static rval *do_pkgconfig(const char *name);
 
 /* Add one tuple-literal element, flattening splats and dropping elements whose
@@ -637,7 +652,7 @@ struct fb_class;
 typedef struct {
 	def    defs[512]; size_t ndefs;
 	renv   top; t_env env;
-	rval  *args, *cwd;
+	rval  *args, *cwd, *globals;
 	int    in_run, bench;
 	char **print_q; size_t print_n, print_cap;
 	fb_Reg regs[FB_MAX_REG]; int nreg;
@@ -730,6 +745,15 @@ void     fb_cmd_push(fb_State *S, fb_Value c, fb_Value w) { (void)S; rv_push((rv
 void     fb_set (fb_State *S, fb_Value m, const char *k, fb_Value v) {
 	(void)S; map_set((rval*)m, a_dup(k ? k : ""), (rval*)v);
 }
+
+/* Mutable stores: _GLOBALS is the active state's store; _SHARED is process-
+ * global. get returns nil when absent. Operate on the active state (call after
+ * fb_activate / inside a run); the language sees the same maps as `_GLOBALS`
+ * and `_SHARED`. This is the supported replacement for host-side static slots. */
+fb_Value fb_global_get(fb_State *S, const char *k)              { (void)S; return (fb_Value)map_get(store_globals(), k ? k : ""); }
+void     fb_global_set(fb_State *S, const char *k, fb_Value v)  { (void)S; map_set(store_globals(), a_dup(k ? k : ""), (rval*)v); }
+fb_Value fb_shared_get(fb_State *S, const char *k)             { (void)S; return (fb_Value)map_get(store_shared(),  k ? k : ""); }
+void     fb_shared_set(fb_State *S, const char *k, fb_Value v) { (void)S; map_set(store_shared(),  a_dup(k ? k : ""), (rval*)v); }
 
 /* value inspection */
 fb_Kind fb_kind(fb_Value v) {
@@ -2330,6 +2354,24 @@ static rval *eval(ast *n, renv *e) {
 		return v;
 	}
 
+	case AST_STORE: {
+		/* "lvalue <- rhs": mutate a slot of a store map in place. lvalue is a
+		 * field/index chain; its base must evaluate to a map (typically
+		 * _GLOBALS/_SHARED, or a nested map). The write is eager. */
+		ast *lv = n->kids[0];
+		rval *rhs = eval(n->kids[1], e);
+		if (lv->kind != AST_FIELD)
+			return (rval *)fb_error(g_active, "<- target is not a writable field");
+		rval *base = eval(lv->kids[0], e);
+		if (!base || (base->k != RV_MAP && base->k != RV_OBJECT))
+			return (rval *)fb_error(g_active, "<- target base is not a map");
+		char *key = (!lv->tok && lv->nkids == 2)   /* dynamic ".{expr}" */
+		          ? a_dup(as_cstr(eval(lv->kids[1], e)))
+		          : dup_tok(lv->tok);
+		map_set(base, key, rhs);
+		return rhs;
+	}
+
 	case AST_FORCE: {
 		/* "~x": re-evaluate x ignoring memoization. For a lazy top-level def
 		 * that means re-running its rhs; an env-bound value is already final. */
@@ -2350,6 +2392,8 @@ static rval *eval(ast *n, renv *e) {
 		if (d) return d;
 		if (tok_is(n->tok, "args")) return g_args;   /* CLI args list */
 		if (tok_is(n->tok, "cwd")) return g_cwd;   /* CLI args list */
+		if (tok_is(n->tok, "_GLOBALS")) return store_globals();
+		if (tok_is(n->tok, "_SHARED"))  return store_shared();
 		char *nm = dup_tok(n->tok);
 		if (is_builtin(nm)) {             /* a builtin used as a value */
 			rval *v = rv(RV_BUILTIN);
@@ -2905,6 +2949,7 @@ static void fb_gsave(struct fb_State *S) {
 	fb_globals *g = &S->snap;
 	memcpy(g->defs, g_defs, sizeof g_defs); g->ndefs = g_ndefs;
 	g->top = g_top; g->env = g_env; g->args = g_args; g->cwd = g_cwd;
+	g->globals = g_globals;   /* _SHARED (g_shared) is process-global: not saved */
 	g->in_run = g_in_run; g->bench = g_bench;
 	g->print_q = g_print_q; g->print_n = g_print_n; g->print_cap = g_print_cap;
 	memcpy(g->regs, g_regs, sizeof g_regs); g->nreg = g_nreg;
@@ -2915,6 +2960,7 @@ static void fb_gload(struct fb_State *S) {
 	fb_globals *g = &S->snap;
 	memcpy(g_defs, g->defs, sizeof g_defs); g_ndefs = g->ndefs;
 	g_top = g->top; g_env = g->env; g_args = g->args; g_cwd = g->cwd;
+	g_globals = g->globals;
 	g_in_run = g->in_run; g_bench = g->bench;
 	g_print_q = g->print_q; g_print_n = g->print_n; g_print_cap = g->print_cap;
 	memcpy(g_regs, g->regs, sizeof g_regs); g_nreg = g->nreg;

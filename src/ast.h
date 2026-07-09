@@ -9,6 +9,8 @@ typedef enum {
 	AST_PROGRAM,    /* kids = statements                           */
 	AST_ASSIGN,     /* tok = name id, kids[0] = value              */
 	AST_EAGER,      /* tok = name id, kids[0] = value; "~=" eager  */
+	AST_STORE,      /* tok = "<-", kids[0]=lvalue (field chain),   */
+	                /* kids[1]=rhs; writes into a _GLOBALS slot     */
 	AST_FORCE,      /* tok = "~", kids[0]=operand; re-eval, no memo */
 	AST_TUPLE,      /* kids = elements (>= 2)                      */
 	AST_MAPLIT,     /* kids = entries, each AST_TUPLE(key,value)   */

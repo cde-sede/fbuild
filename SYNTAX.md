@@ -21,7 +21,8 @@ recursive-descent parser. For what the builtins/values *mean*, see `SKILLS.md`.
 - **Path**: `[ ... ]` — a bare path literal, e.g. `[src/*.c]`, `[build]`,
   `[/usr/bin]`. No nested `[`/`]`.
 - **Operators / punctuation**:
-  `=  ~=  ~  ->  |>  //  ...  >>  < > <= >= == !=  . , :  * & @ + - / %  ( ) { } [ ]`.
+  `=  ~=  ~  ->  |>  //  ...  >>  <-  < > <= >= == !=  . , :  * & @ + - / %  ( ) { } [ ]`.
+  (`<-` is lexed before `<`, so `a<-b` is a store, not `a < -b`; space the compare if meant.)
 
 Bare-word note: an identifier that is **not** bound (no def/param) evaluates to its
 literal text (a string). So map keys and command words can be written unquoted.
@@ -33,6 +34,7 @@ A program is a sequence of statements; each statement is one expression.
 ```
 NAME = expr          # lazy, memoized top-level definition (first def wins)
 NAME ~= expr         # eager, re-definable assignment (runs at this point)
+LVALUE <- expr       # store into a mutable slot (see "Mutable stores" below)
 expr                 # evaluated eagerly, top to bottom (side effects: run, print, ...)
 
 type NAME(params) = expr        # define a custom object type; NAME becomes a
@@ -50,7 +52,7 @@ unbound.
 
 ## Expressions (loosest → tightest precedence)
 
-1. **assignment** `NAME = e`, `NAME ~= e`
+1. **assignment / store** `NAME = e`, `NAME ~= e`, `LVALUE <- e`
 2. **tuple** `a, b, c` (comma) → a Tuple
 3. **lambda** `params -> body` (`x -> ...`, `a, b -> ...`, `@rest -> ...`, `.f -> ...`)
 4. **sequence** `a >> b` (ordered; build dependency)
@@ -115,6 +117,28 @@ compile = o, s -> `{CC} -c {...s} -o {.o}` when stale(.o, ...s) or FORCE
 val     = e where tmp = heavy(), n = length(tmp) when n > 0
 run(x) when contains(TARGETS, 'all') or length(TARGETS) == 0
 ```
+
+## Mutable stores (`<-`)
+
+Everything else is immutable (`=` is a lazy def, `.f` reads). `<-` is the one
+mutation form: it writes into a slot of a map, in place, eagerly. `LVALUE` is a
+field/index chain whose base evaluates to a map:
+
+```
+_GLOBALS.count <- 0                    # named slot
+_GLOBALS.count <- _GLOBALS.count + 1   # reads are plain field access
+_GLOBALS.{i}   <- item                 # dynamic slot (.{expr})
+_SHARED.theme  <- [dark]               # process-global store
+n = _GLOBALS.count                     # read
+```
+
+Two built-in stores back this: `_GLOBALS` (per-interpreter, the usual choice)
+and `_SHARED` (one store shared across every interpreter and plugin in the
+process). Both are ordinary maps — `keys`, `has`, `get`, `.field` all work — that
+happen to be writable and persist across the whole run. Writing a base that
+isn't a map is a type error; new keys on `_GLOBALS`/`_SHARED` are always allowed.
+The value stored is what you wrote (no copy in this build). See SKILLS.md for
+semantics and EMBEDDING.md for the `fb_global_*` / `fb_shared_*` C API.
 
 ## Interpolation
 
