@@ -92,6 +92,13 @@ typedef struct ast {
 	size_t       nkids;
 	size_t       cap;
 	obj_type    *type;      /* inferred type, NULL until inference runs */
+
+	/* eval caches (run.c). Nodes are arena-zeroed, so 0 == "not cached". */
+	long         ival;      /* AST_INT: parsed literal (ival_set != 0)      */
+	int          ival_set;
+	const void  *rg_val;    /* AST_CALL: memoized fb_Reg* (may cache a miss) */
+	void        *rg_state;  /* owning fb_State the memo is valid for         */
+	int          rg_gen;    /* registration generation the memo saw          */
 } ast;
 
 extern const char *ast_name[];

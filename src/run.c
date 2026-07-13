@@ -101,6 +101,16 @@ static long tok_index(token *t) {
 	return v;
 }
 
+/* decimal render of a long, arena-backed (hot path: no snprintf) */
+static char *ltoa_a(long x) {
+	char tmp[24];
+	char *p = tmp + sizeof tmp;
+	unsigned long u = x < 0 ? -(unsigned long)x : (unsigned long)x;
+	do { *--p = (char)('0' + u % 10); u /= 10; } while (u);
+	if (x < 0) *--p = '-';
+	return a_dupn(p, (size_t)(tmp + sizeof tmp - p));
+}
+
 /* a runtime value rendered as a command-line argument */
 char *as_cstr(rval *v) {
 	if (!v) return "";
@@ -108,7 +118,7 @@ char *as_cstr(rval *v) {
 	case RV_STR:
 	case RV_FILE: return v->s ? v->s : "";
 	case RV_INT:
-	case RV_BOOL: { char *b = a_alloc(24); snprintf(b, 24, "%ld", v->i); return b; }
+	case RV_BOOL: return ltoa_a(v->i);
 	default:      return "";
 	}
 }
@@ -116,7 +126,8 @@ char *as_cstr(rval *v) {
 /* ---- environment ------------------------------------------------------ */
 
 static void env_put(renv *e, token *name, rval *val) {
-	struct rbind *b = a_alloc(sizeof *b);
+	struct rbind *b = e->nslots < 2 ? &e->slots[e->nslots++]
+	                                : a_alloc(sizeof *b);
 	b->name = name; b->val = val; b->next = e->head; e->head = b;
 }
 static rval *env_get(renv *e, token *name) {
@@ -585,6 +596,17 @@ static rval **eval_args(ast *call, renv *e, size_t *out_n) {
 
 /* ---- application ------------------------------------------------------ */
 
+/* tuple with exact capacity, one items allocation (vs rv_push doubling) */
+static rval *rv_tuple_n(rval **items, size_t k) {
+	rval *t = rv(RV_TUPLE);
+	if (k) {
+		t->items = a_alloc(k * sizeof *t->items);
+		memcpy(t->items, items, k * sizeof *t->items);
+		t->n = t->cap = k;
+	}
+	return t;
+}
+
 static rval *positional(rval *arg, size_t i) {
 	if (arg && (arg->k == RV_TUPLE || arg->k == RV_LIST) && i < arg->n)
 		return arg->items[i];
@@ -713,10 +735,13 @@ rval *apply_scratch(rval *fn, rval *arg) {
 
 static fb_Reg g_regs[FB_MAX_REG];   /* live registry (part of the active state) */
 static int    g_nreg;
+static int    g_reg_gen = 1;        /* bumped on every registration; never 0 so
+                                     * zeroed ast memo fields read as stale */
 
 void fb_register(fb_State *S, const fb_Reg *reg) {
 	fb_activate(S);
 	if (!reg || !reg->name || !reg->fn) return;
+	g_reg_gen++;
 	for (int i = 0; i < g_nreg; i++)          /* last registration wins */
 		if (!strcmp(g_regs[i].name, reg->name)) { g_regs[i] = *reg; return; }
 	if (g_nreg < FB_MAX_REG) g_regs[g_nreg++] = *reg;
@@ -807,8 +832,7 @@ fb_Value fb_apply(fb_State *S, fb_Value fn, fb_Value *args, int nargs) {
 	if (nargs == 1) {
 		arg = (rval*)args[0];
 	} else {
-		arg = rv(RV_TUPLE);
-		for (int i = 0; i < nargs; i++) rv_push(arg, (rval*)args[i]);
+		arg = rv_tuple_n((rval **)args, nargs < 0 ? 0 : (size_t)nargs);
 	}
 	return (fb_Value)apply((rval*)fn, arg);
 }
@@ -1076,25 +1100,57 @@ static rval *build_command(ast *node, renv *e) {
 
 /* ---- evaluator -------------------------------------------------------- */
 
+/* integer fast path: evaluate an arithmetic subtree to a raw long without
+ * boxing the intermediates (an rval per +|-|*|/|% node is the allocation-
+ * heavy part of hot loops). Falls back to eval() for anything else, matching
+ * the generic path exactly (it also read ->i unconditionally). */
+static long eval_long(ast *n, renv *e) {
+	switch (n->kind) {
+	case AST_INT:
+		if (!n->ival_set) { n->ival = strtol(n->tok->string, NULL, 10); n->ival_set = 1; }
+		return n->ival;
+	case AST_ARITH: {
+		long a = eval_long(n->kids[0], e);
+		long b = eval_long(n->kids[1], e);
+		switch (n->tok->kind) {
+		case TOK_PLUS:    return a + b;
+		case TOK_MINUS:   return a - b;
+		case TOK_STAR:    return a * b;
+		case TOK_SLASH:   return b ? a / b : 0;
+		default:          return b ? a % b : 0;   /* TOK_PERCENT */
+		}
+	}
+	default:
+		return eval(n, e)->i;
+	}
+}
+
 rval *eval(ast *n, renv *e) {
 	switch (n->kind) {
-	case AST_INT:    return rv_int(strtol(n->tok->string, NULL, 10));
+	case AST_INT:
+		if (!n->ival_set) { n->ival = strtol(n->tok->string, NULL, 10); n->ival_set = 1; }
+		return rv_int(n->ival);
 	case AST_BOOL:   return rv_bool(n->tok->len == 4);   /* "true" vs "false" */
 	case AST_STRTEXT: return rv_str(str_unescape(n->tok->string, n->tok->len));
 	case AST_STRING: {
 		if (n->nkids == 0)                       /* plain string */
 			return rv_str(str_unescape(n->tok->string, n->tok->len));
-		/* interpolated: concatenate text chunks and {expr} values */
+		/* interpolated: concatenate text chunks and {expr} values. as_cstr
+		 * results are arena-stable, so keep pointers and memcpy once. */
 		size_t tot = 0;
 		char **parts = a_alloc(n->nkids * sizeof *parts);
+		size_t *lens = a_alloc(n->nkids * sizeof *lens);
 		for (size_t i = 0; i < n->nkids; i++) {
-			parts[i] = a_dup(as_cstr(eval(n->kids[i], e)));
-			tot += strlen(parts[i]);
+			parts[i] = as_cstr(eval(n->kids[i], e));
+			lens[i]  = strlen(parts[i]);
+			tot += lens[i];
 		}
-		char *b = a_alloc(tot + 1);
-		b[0] = '\0';
-		for (size_t i = 0; i < n->nkids; i++)
-			strcat(b, parts[i]);
+		char *b = a_alloc(tot + 1), *w = b;
+		for (size_t i = 0; i < n->nkids; i++) {
+			memcpy(w, parts[i], lens[i]);
+			w += lens[i];
+		}
+		*w = '\0';
 		return rv_str(b);
 	}
 	case AST_PATH:   return rv_file(dup_tok(n->tok));
@@ -1363,17 +1419,8 @@ rval *eval(ast *n, renv *e) {
 		return rv_bool(res);
 	}
 
-	case AST_ARITH: {                    /* + - * / %, integer */
-		long a = eval(n->kids[0], e)->i;
-		long b = eval(n->kids[1], e)->i;
-		switch (n->tok->kind) {
-		case TOK_PLUS:    return rv_int(a + b);
-		case TOK_MINUS:   return rv_int(a - b);
-		case TOK_STAR:    return rv_int(a * b);
-		case TOK_SLASH:   return rv_int(b ? a / b : 0);
-		default:          return rv_int(b ? a % b : 0);   /* TOK_PERCENT */
-		}
-	}
+	case AST_ARITH:                      /* + - * / %, integer (unboxed inner) */
+		return rv_int(eval_long(n, e));
 
 	case AST_LOGICAL: {                  /* and / or / ||, short-circuit */
 		rval *l = eval(n->kids[0], e);
@@ -1425,8 +1472,18 @@ rval *eval(ast *n, renv *e) {
 		if (callee->kind == AST_ID) {
 			/* registered builtin (core + host/plugin). FB_LAZY builtins get
 			 * their args as unevaluated thunks (no splat flatten); everyone else
-			 * gets evaluated, splat-flattened args. Dispatch through the ABI. */
-			const fb_Reg *rg = fb_reg_find_tok(callee->tok);
+			 * gets evaluated, splat-flattened args. Dispatch through the ABI.
+			 * The lookup (a linear registry scan, hits AND misses) is memoized
+			 * per call site, invalidated by state switch or registration. */
+			const fb_Reg *rg;
+			if (n->rg_state == (void *)g_active && n->rg_gen == g_reg_gen) {
+				rg = (const fb_Reg *)n->rg_val;
+			} else {
+				rg = fb_reg_find_tok(callee->tok);
+				n->rg_val   = rg;
+				n->rg_state = g_active;
+				n->rg_gen   = g_reg_gen;
+			}
 			if (rg) {
 				if (rg->flags & FB_LAZY) {
 					size_t na2 = n->nkids - 1;
@@ -1447,14 +1504,7 @@ rval *eval(ast *n, renv *e) {
 		rval *fn = eval(callee, e);
 		size_t k;
 		rval **as = eval_args(n, e, &k);
-		rval *arg;
-		if (k == 1) {
-			arg = as[0];
-		} else {
-			arg = rv(RV_TUPLE);
-			for (size_t i = 0; i < k; i++)
-				rv_push(arg, as[i]);
-		}
+		rval *arg = (k == 1) ? as[0] : rv_tuple_n(as, k);
 		return apply(fn, arg);
 	}
 
