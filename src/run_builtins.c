@@ -393,25 +393,45 @@ static rval *do_drop(rval *list, rval *count) {
 	return out;
 }
 
-static int cmp_rv(const void *a, const void *b) {
-	return strcmp(as_cstr(*(rval *const *)a), as_cstr(*(rval *const *)b));
+/* sort/unique key: each element stringified ONCE. as_cstr per qsort
+ * comparison was O(n log n) arena allocations, and unique's rescan made it
+ * O(n^2) stringify -- large lists blew the arena (OOM) and took seconds. */
+typedef struct { const char *key; rval *val; } sort_keyed;
+static int cmp_keyed(const void *a, const void *b) {
+	return strcmp(((sort_keyed const *)a)->key, ((sort_keyed const *)b)->key);
+}
+static unsigned long key_hash(const char *s) {        /* FNV-1a */
+	unsigned long h = 1469598103934665603UL;
+	while (*s) { h ^= (unsigned char)*s++; h *= 1099511628211UL; }
+	return h;
 }
 static rval *do_sort(rval *list) {
 	rval *out = rv(RV_LIST);
 	if (!is_seq(list)) return out;
-	for (size_t i = 0; i < list->n; i++) rv_push(out, list->items[i]);
-	if (out->n) qsort(out->items, out->n, sizeof *out->items, cmp_rv);
+	size_t len = list->n;
+	sort_keyed *arr = len ? a_alloc(len * sizeof *arr) : NULL;
+	for (size_t i = 0; i < len; i++)
+		arr[i] = (sort_keyed){ as_cstr(list->items[i]), list->items[i] };
+	if (len) qsort(arr, len, sizeof *arr, cmp_keyed);
+	for (size_t i = 0; i < len; i++) rv_push(out, arr[i].val);
 	return out;
 }
+/* first occurrence wins, by string key; open-addressed set -> O(n). */
 static rval *do_unique(rval *list) {
 	rval *out = rv(RV_LIST);
 	if (!is_seq(list)) return out;
-	for (size_t i = 0; i < list->n; i++) {
+	size_t len = list->n, cap = 16;
+	while (cap < len * 2) cap *= 2;
+	const char **slot = a_alloc(cap * sizeof *slot);
+	for (size_t i = 0; i < len; i++) {
 		const char *s = as_cstr(list->items[i]);
+		size_t h = key_hash(s) & (cap - 1);
 		int seen = 0;
-		for (size_t j = 0; j < out->n; j++)
-			if (strcmp(as_cstr(out->items[j]), s) == 0) { seen = 1; break; }
-		if (!seen) rv_push(out, list->items[i]);
+		while (slot[h]) {
+			if (!strcmp(slot[h], s)) { seen = 1; break; }
+			h = (h + 1) & (cap - 1);
+		}
+		if (!seen) { slot[h] = s; rv_push(out, list->items[i]); }
 	}
 	return out;
 }
@@ -508,15 +528,17 @@ static rval *do_count(rval *list, rval *val) {       /* occurrences of val */
 
 static rval *do_join(rval *list, const char *sep) {
 	if (!is_seq(list)) return rv_str(a_dup(""));
-	size_t tot = 1;
+	size_t seplen = strlen(sep), tot = 1;
 	for (size_t i = 0; i < list->n; i++)
-		tot += strlen(as_cstr(list->items[i])) + strlen(sep);
-	char *b = a_alloc(tot);
-	b[0] = '\0';
+		tot += strlen(as_cstr(list->items[i])) + seplen;
+	char *b = a_alloc(tot), *w = b;      /* write pointer: strcat is O(n^2) */
 	for (size_t i = 0; i < list->n; i++) {
-		if (i) strcat(b, sep);
-		strcat(b, as_cstr(list->items[i]));
+		if (i) { memcpy(w, sep, seplen); w += seplen; }
+		const char *p = as_cstr(list->items[i]);
+		size_t l = strlen(p);
+		memcpy(w, p, l); w += l;
 	}
+	*w = '\0';
 	return rv_str(b);
 }
 
@@ -596,9 +618,13 @@ static rval *do_chars(const char *s) {          /* string -> list of 1-char stri
 static rval *do_cat(rval **a, size_t n) {       /* concat strings */
 	size_t tot = 1;
 	for (size_t i = 0; i < n; i++) tot += strlen(as_cstr(a[i]));
-	char *b = a_alloc(tot);
-	b[0] = '\0';
-	for (size_t i = 0; i < n; i++) strcat(b, as_cstr(a[i]));
+	char *b = a_alloc(tot), *w = b;
+	for (size_t i = 0; i < n; i++) {
+		const char *p = as_cstr(a[i]);
+		size_t l = strlen(p);
+		memcpy(w, p, l); w += l;
+	}
+	*w = '\0';
 	return rv_str(b);
 }
 static rval *do_upper(rval *v) {
