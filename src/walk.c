@@ -338,6 +338,8 @@ static obj_type *infer_id(token *name) {
 		return t_list(t_new(RET_STRING));
 	if (tok_is(name, "cwd"))           /* builtin cwd */
 		return t_new(RET_STRING);
+	if (tok_is(name, "_GLOBALS") || tok_is(name, "_SHARED"))
+		return t_new(RET_VAR);         /* mutable store: dynamic map */
 	if (is_builtin_name(name))
 		return t_new(RET_VAR);
 	type_err(name, "unknown symbol '%.*s'",
@@ -875,6 +877,11 @@ static obj_type *infer(ast *node, scope *sc) {
 
 	case AST_FORCE:                 /* ~x : re-eval x, same type as x */
 		t = infer(node->kids[0], sc);
+		break;
+
+	case AST_STORE:                 /* lvalue <- rhs : yields rhs's type */
+		infer(node->kids[0], sc);   /* type-check the lvalue chain */
+		t = infer(node->kids[1], sc);
 		break;
 
 	case AST_MAPLIT:                /* { k: v } / Map<...> : dynamic map */

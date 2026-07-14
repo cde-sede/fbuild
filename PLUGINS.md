@@ -78,6 +78,13 @@ inspect ints/strings/bools/files/lists/maps, iterate map keys (`fb_key`), build
 runnable commands (`fb_cmd` / `fb_cmd_push`) to hand back to `run()`, call
 language functions (`fb_apply`), and fail with `fb_error`.
 
+For state that must persist between builtin calls or be shared with the host and
+other plugins, use the mutable stores rather than C `static` variables:
+`fb_shared_get/set(S, key, v)` (process-global, script `_SHARED`) or
+`fb_global_get/set` (per-interpreter, script `_GLOBALS`). They survive across
+runs and the script sees the same maps — the supported replacement for a stashed
+`static fb_Value` slot.
+
 Set `FB_LAZY` in the flags to receive unevaluated thunk arguments and control
 evaluation yourself with `fb_force` — that is how you add new *control forms*, not
 just new functions. Example: a command factory plus a lazy conditional:

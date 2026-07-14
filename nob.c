@@ -12,10 +12,11 @@
 /* library translation units (everything except the CLI entry point) */
 static const char *lib_src[] = {
 	"src/build_system.c", "src/parser.c", "src/walk.c", "src/run.c", "src/eval.c",
+	"src/run_builtins.c", "src/build_impl.c",
 };
 /* headers: any change forces a full rebuild (nob can't see #include deps) */
 static const char *hdrs[] = {
-	"src/cparser.h", "src/ast.h", "src/graph.h", "src/fbuild.h",
+	"src/cparser.h", "src/ast.h", "src/graph.h", "src/fbuild.h", "src/run_internal.h",
 	"cds-lib/cds_lib/build.h",
 };
 

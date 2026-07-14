@@ -4,6 +4,7 @@
 #   ./fbuild                  # rebuild (default target)
 #   ./fbuild -f               # force a full rebuild
 #   ./fbuild --compile-commands
+#   ./fbuild plugins          # build plugins/*.c -> build/*.so
 #   ./fbuild install
 #   ./fbuild --help           # generated from the schema below
 opts = Parser<{
@@ -23,7 +24,7 @@ TARGETS  = opts.rest
 EXE    = [fbuild]
 SRCS   = glob([src/*.c])
 OBJS   = SRCS |> f -> path([build], cat(stem(f), '.o'))
-HDRS   = concat(glob([src/*.h]), glob([cds-lib/cds_lib/*.h]), glob([cds-lib/*.h]))
+HDRS   = concat(glob([src/*.h]), glob([cds-lib/cds_lib/*.h]), glob([cds-lib/*.h]), glob([cds-lib/*.c]))
 CC     = 'cc'
 CFLAGS = '-ggdb', '-Icds-lib', '-Wall', '-Wextra', '-O2', '-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0'
 log    = l, m -> print(cat('[', l, '] ', m))
@@ -43,12 +44,23 @@ units = zip(OBJS, SRCS)
 objs  = units |> @u -> create_cmd(compile, ...u)
 exe   = create_cmd(link, EXE, OBJS)
 
+# plugins: each plugins/*.c -> build/*.so. A plugin includes only fbuild.h; the
+# fb_* symbols resolve at load time from the -rdynamic fbuild host, so the .so
+# links against nothing. Built on demand via `./fbuild plugins`.
+PLUGIN_SRCS = glob([plugins/*.c])
+PLUGINS     = PLUGIN_SRCS |> f -> path([build], cat(stem(f), '.so'))
+plugin_cc   = o, s -> `{CC} -shared -fPIC -Isrc {...CFLAGS} {...s} -o {.o}`
+                      when stale(.o, ...s, [src/fbuild.h]) or FORCE
+plugins     = zip(PLUGINS, PLUGIN_SRCS) |> @u -> create_cmd(plugin_cc, ...u)
+
 mkdir([build])
-json_write([compile_commands.json], units |> u -> create_cmd(entry, ...u)) when COMMANDS
+log("INFO", "Compile commands done!"), json_write([compile_commands.json], units |> u -> create_cmd(entry, ...u)) when COMMANDS
+
+run(plugins), log("INFO", "plugins built") when contains(TARGETS, 'plugins')
 
 log("INFO", "{EXE} up to date") when not (
 	bench('build', run(objs >> exe))
 		when (contains(TARGETS, 'all') or length(TARGETS) == 0)
-			and (stale(EXE, ...SRCS, ...OBJS) or FORCE)
+			and (stale(EXE, ...SRCS, ...OBJS, ...HDRS) or FORCE)
 ) when not contains(TARGETS, 'install')
 log("INFO", "installed!") when (copy(EXE, join((env('PREFIX_INSTALL_PATH') || [/usr/bin], EXE.name), '/')) when contains(TARGETS, 'install')).name != ''

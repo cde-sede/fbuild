@@ -18,6 +18,7 @@ true  false                            Bool literals
 =    : name = expr      lazy memoized def (first def wins; eval'd on first use)
 ~=   : name ~= expr     eager assign at this point; re-definable, shadows `=`
 ~e   : ~var             force re-eval of var, ignoring memoization
+<-   : lval <- expr     store into a mutable map slot (only mutation; see vars)
 ->   : params -> body
 |>   : a |> f          = f(a)
 >>   : a >> b          sequential
@@ -227,9 +228,28 @@ object -> Map, array -> List, number -> Int|String(real), bool -> Bool, null -> 
 ## vars
 
 ```
-args : List<String>
-cwd  : String
+args     : List<String>
+cwd      : String
+_GLOBALS : Map                        per-interpreter mutable store (see below)
+_SHARED  : Map                        process-global mutable store (all states/plugins)
 ```
+
+### mutable stores
+
+`_GLOBALS` and `_SHARED` are the only mutable state. Both are ordinary maps you
+can write into with `<-` (in place, eager) and read with `.field` / `get` — a
+place to accumulate across a run when threading a value through returns is
+awkward (counters, caches, host/plugin state):
+```
+_GLOBALS.count <- 0
+xs |> n -> (_GLOBALS.count <- _GLOBALS.count + 1)   # side effect per element
+total = _GLOBALS.count
+_SHARED.cfg <- { "jobs": 4 }                        # visible to every interpreter
+```
+`_GLOBALS` is saved/restored with each interpreter (multi-state safe); `_SHARED`
+is one store for the whole process (cross-state / plugin sharing). Writing into a
+base that isn't a map is a type error; new keys are always allowed. Same maps are
+reachable from C via `fb_global_*` / `fb_shared_*` (EMBEDDING.md).
 
 ## cli args
 

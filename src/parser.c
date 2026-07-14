@@ -22,6 +22,21 @@ void *arena_new(void) {
 }
 void arena_use(void *a)  { g_arena = (mem_arena *)a; }
 void arena_free(void *a) { if (a) arena_destroy((mem_arena *)a); }
+void *arena_current(void) { return g_arena; }
+
+/* --- arena introspection for generational rv_clone / scratch reclamation ---
+ * An arena is a linear bump allocator whose base address is the mem_arena* and
+ * whose live bytes are [base, base+pos). These let the executor test whether a
+ * pointer lives in a given arena and snapshot / restore a scratch arena. */
+int arena_owns(void *a, const void *p) {
+	mem_arena *m = (mem_arena *)a;
+	if (!m || !p) return 0;
+	const char *base = (const char *)m;
+	const char *ptr  = (const char *)p;
+	return ptr >= base && ptr < base + m->pos;
+}
+size_t arena_pos(void *a)             { return a ? ((mem_arena *)a)->pos : 0; }
+void   arena_reset_to(void *a, size_t pos) { if (a) arena_pop_to((mem_arena *)a, pos); }
 
 void arena_init(void) { arena_use(arena_new()); }
 void arena_fini(void) {
@@ -76,6 +91,7 @@ const char *kind_name[] = {
 	[TOK_MORPH]="TOK_MORPH",
 	[TOK_SPLAT]="TOK_SPLAT",
 	[TOK_SEQ]="TOK_SEQ",
+	[TOK_WRITE]="TOK_WRITE",
 
 	[TOK_LT]="TOK_LT",
 	[TOK_GT]="TOK_GT",
@@ -159,8 +175,15 @@ void tok_free(token *t)            { (void)t; }
 void parser_free(struct parser *pp) { (void)pp; }
 
 void emit(int kind, char *str, size_t len, int sl, int sc, int el, int ec) {
-	if (p->pos >= MAX_TOKENS)
+	if (p->pos >= MAX_TOKENS) {
+		static int warned = 0;        /* warn once, then keep dropping */
+		if (!warned) {
+			warned = 1;
+			fprintf(stderr, "error: script exceeds MAX_TOKENS (%d); "
+			                "tokens dropped, parse will be incomplete\n", MAX_TOKENS);
+		}
 		return;
+	}
 	p->tokens[p->pos++] = (token){
 		.kind = kind, .start = {sc, sl}, .end = {ec, el},
 		.string = str, .len = len};

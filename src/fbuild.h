@@ -98,6 +98,17 @@ const char *fb_error_msg(fb_State *S);
 /* Read a top-level def by name after a successful run (nil if absent). */
 fb_Value  fb_global(fb_State *S, const char *name);
 
+/* Mutable key/value stores, the supported replacement for host-side static
+ * slots (the old l_save/l_restore pattern). `_global` is the active state's
+ * store (visible in scripts as `_GLOBALS`); `_shared` is process-global,
+ * shared across states and plugins (script name `_SHARED`). get returns nil
+ * when the key is absent. Values are stored as handed in; do not pass a value
+ * whose lifetime ends before the store's. */
+fb_Value  fb_global_get(fb_State *S, const char *key);
+void      fb_global_set(fb_State *S, const char *key, fb_Value v);
+fb_Value  fb_shared_get(fb_State *S, const char *key);
+void      fb_shared_set(fb_State *S, const char *key, fb_Value v);
+
 /* ---- custom objects (classes + methods) ------------------------------- */
 /* A class is a nominal tag plus a method table; an object carries its class,
  * a field map (build with fb_set / read with fb_field / fb_key), and optional

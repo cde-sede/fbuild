@@ -415,6 +415,14 @@ void lex(char *s)
 			continue;
 		}
 
+		if (!strncmp(s + i, "<-", 2)) {
+			emit(TOK_WRITE, s + i, 2,
+			     sl, sc, line, col + 1);
+			i += 2;
+			col += 2;
+			continue;
+		}
+
 		if (!strncmp(s + i, ">>", 2)) {
 			emit(TOK_SEQ, s + i, 2,
 			     sl, sc, line, col + 1);
@@ -664,6 +672,7 @@ const char *ast_name[] = {
 	[AST_PROGRAM]="program",
 	[AST_ASSIGN]="assign",
 	[AST_EAGER]="eager",
+	[AST_STORE]="store",
 	[AST_FORCE]="force",
 	[AST_TUPLE]="tuple",
 	[AST_MAPLIT]="maplit",
@@ -1463,7 +1472,18 @@ static ast *parse_expression(void) {
 		 * element. The lambda may still be one element of a tuple, so fall
 		 * through to the comma check. */
 		ast *first = lambda_ahead(1) ? parse_lambda() : parse_expr_no_tuple();
-		if (sig_kind() != TOK_COMMA) {
+		if (sig_kind() == TOK_WRITE) {
+			/* "lvalue <- rhs": store into a _GLOBALS/_SHARED slot. The lvalue
+			 * is the field/index chain already parsed into `first`. */
+			ast *st = node(AST_STORE);
+			skip_nl();
+			st->tok = tok_cur();
+			accept(.kind = TOK_WRITE);
+			skip_nl();
+			push(st, first);                 /* lvalue */
+			push(st, parse_expression());    /* rhs   */
+			res = st;
+		} else if (sig_kind() != TOK_COMMA) {
 			res = first;
 		} else {
 			ast *n = node(AST_TUPLE);          /* tuple: e *( "," e ) */
