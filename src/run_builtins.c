@@ -314,8 +314,9 @@ static rval *do_last(rval *list) {
 	return (is_seq(list) && list->n) ? list->items[list->n - 1] : &RV_UNIT;
 }
 
-/* take(list, n): first n elements. drop(list, n): all but the first n.
- * n is clamped to [0, len]; negative n counts from the end. */
+/* take/drop/sort/unique moved to the fbloop plugin (list glue split, see
+ * comment on fb_open_base's base[] table below); this file no longer carries
+ * them (would duplicate the plugin's equivalently-optimized versions). */
 
 /* python-style list ops -------------------------------------------------- */
 
@@ -326,15 +327,17 @@ static rval *do_last(rval *list) {
 
 static rval *do_join(rval *list, const char *sep) {
 	if (!is_seq(list)) return rv_str(a_dup(""));
-	size_t tot = 1;
+	size_t seplen = strlen(sep), tot = 1;
 	for (size_t i = 0; i < list->n; i++)
-		tot += strlen(as_cstr(list->items[i])) + strlen(sep);
-	char *b = a_alloc(tot);
-	b[0] = '\0';
+		tot += strlen(as_cstr(list->items[i])) + seplen;
+	char *b = a_alloc(tot), *w = b;      /* write pointer: strcat is O(n^2) */
 	for (size_t i = 0; i < list->n; i++) {
-		if (i) strcat(b, sep);
-		strcat(b, as_cstr(list->items[i]));
+		if (i) { memcpy(w, sep, seplen); w += seplen; }
+		const char *p = as_cstr(list->items[i]);
+		size_t l = strlen(p);
+		memcpy(w, p, l); w += l;
 	}
+	*w = '\0';
 	return rv_str(b);
 }
 
@@ -386,9 +389,13 @@ static rval *do_to_str(rval *v) { return rv_str(a_dup(as_cstr(v))); }
 static rval *do_cat(rval **a, size_t n) {       /* concat strings */
 	size_t tot = 1;
 	for (size_t i = 0; i < n; i++) tot += strlen(as_cstr(a[i]));
-	char *b = a_alloc(tot);
-	b[0] = '\0';
-	for (size_t i = 0; i < n; i++) strcat(b, as_cstr(a[i]));
+	char *b = a_alloc(tot), *w = b;
+	for (size_t i = 0; i < n; i++) {
+		const char *p = as_cstr(a[i]);
+		size_t l = strlen(p);
+		memcpy(w, p, l); w += l;
+	}
+	*w = '\0';
 	return rv_str(b);
 }
 /* pad s to width with fill; side: -1 pad left, +1 pad right, 0 center */

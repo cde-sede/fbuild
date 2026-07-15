@@ -85,26 +85,42 @@ typedef enum {
 typedef struct rval rval;
 typedef struct renv renv;
 
+/* The kind-specific payloads overlap (anonymous union): sequence-likes
+ * (LIST/TUPLE/CMD/MAP/OBJECT) never carry lambda fields and vice versa, so
+ * the struct shrinks 120 -> 80 bytes -- every rval is arena-allocated and
+ * zeroed, so this directly cuts the allocator + memset hot path. `i` and `s`
+ * stay standalone: RV_STR uses both (json numeric marker). All access sites
+ * are kind-guarded (is_seq / switch on ->k) before touching union members. */
 struct rval {
 	rkind   k;
-	long    i;          /* int / bool                          */
-	double  f;          /* float                                */
-	char   *s;          /* string / file path                  */
-	rval  **items;      /* list / tuple / cmd args; map values */
-	char  **keys;       /* map keys, parallel to items         */
-	size_t  n;
-	size_t  cap;        /* allocated slots in items            */
-	ast    *params;     /* lambda                              */
-	ast    *body;
-	renv   *env;        /* lambda closure                      */
-	char   *from, *to;  /* morphism patterns                   */
+	long    i;          /* int / bool; RV_STR: json numeric marker */
+	double  f;          /* float                                    */
+	char   *s;          /* string / file path / builtin name       */
+	union {
+		struct {
+			rval  **items;      /* list / tuple / cmd args; map values */
+			char  **keys;       /* map keys, parallel to items         */
+			size_t  n;
+			size_t  cap;        /* allocated slots in items            */
+		};
+		struct {
+			ast    *params;     /* lambda                              */
+			ast    *body;       /* lambda / thunk / deferred seq       */
+			renv   *env;        /* lambda closure                      */
+		};
+		struct { char *from, *to; };  /* morphism patterns             */
+	};
 	char   *label;      /* def name, for group display         */
 	void   *cls;        /* RV_OBJECT: its class (struct fb_class*) */
 	void   *nat;        /* RV_OBJECT: native data; RV_CFUN: fb_CFunction */
 };
 
 struct rbind { token *name; rval *val; struct rbind *next; };
-struct renv  { struct rbind *head; rval *arg; renv *parent; };
+/* Two inline bind slots cover the common lambda frame (<= 2 params) without a
+ * separate rbind allocation each; extra binds fall back to the arena. renv is
+ * always zero-initialized (arena or static), so nslots starts at 0. */
+struct renv  { struct rbind *head; rval *arg; renv *parent;
+               struct rbind slots[2]; int nslots; };
 
 /* tagged-object class (RV_OBJECT). Shared so repr() (run_builtins.c) can name
  * an object; the class table itself is managed in run.c. */
