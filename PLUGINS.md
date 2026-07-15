@@ -55,15 +55,34 @@ cc -fPIC -shared -Isrc -Icds-lib shout.c -o shout.so
 
 ## Loading
 
-Two ways, both take effect **before** type-checking so the checker knows the new
-names:
+Three ways, all take effect **before** type-checking so the checker knows the
+new names:
 
 ```sh
 fbuild --plugin ./shout.so             # CLI flag (repeatable)
-FBUILD_PLUGINS=./shout.so fbuild       # colon-separated list
+FBUILD_PLUGINS=./shout.so fbuild       # colon-separated list of .so paths
+FBUILD_PLUGIN_PATH=./build fbuild          # colon-separated list of DIRS; every
+                                        # *.so directly inside each dir loads,
+                                        # sorted by filename, non-recursive
 ```
 
 `--plugin` arguments are consumed by fbuild and not forwarded to the script.
+Load order: `--plugin` flags first, then `FBUILD_PLUGINS`, then
+`FBUILD_PLUGIN_PATH` directories. A directory in `FBUILD_PLUGIN_PATH` that can't be
+opened is an error, not a silent skip.
+
+`fbuild`'s own flags (`--plugin`, `--script`, `--list-plugins`) are only
+recognized **before** a `:::` separator, if one is present — the same
+separator that splits fbuild's own args from the args forwarded to the script
+(see `args` in SKILLS.md). Anything at or after `:::` is passed through
+untouched, so `fbuild ::: --list-plugins` forwards `--list-plugins` to the
+script instead of acting on it.
+
+```sh
+fbuild --list-plugins    # print resolved plugin .so paths (--plugin flags,
+                          # then FBUILD_PLUGINS, then FBUILD_PLUGIN_PATH), one per
+                          # line, and exit without running a script
+```
 
 Then use it in a `.fb`:
 
@@ -133,6 +152,32 @@ s.close()
 `fb_object_data` retrieves the native pointer inside a method. Objects also have
 a field map (`fb_set` / `fb_field` / `fb_key`), interchangeable with language
 `type` objects.
+
+## Bare-name namespace objects
+
+The `socket_open(...)` example above needs a constructor call before `.send`
+works. For a *stateless* object — a bag of related functions, not a resource
+tied to a constructor argument — skip the constructor and bind one shared
+instance straight to an identifier with `fb_global_bind`, so the script can
+call methods on it immediately with no setup:
+
+```c
+fb_Class RE = fb_class(S, "Regex");
+fb_method(S, RE, "findall", m_findall);
+/* ...other methods... */
+
+/* type checker must recognize the bare name; the fn only runs if someone
+ * calls regex(...) directly instead of a method, so make it fb_error */
+fb_register(S, &(fb_Reg){ "regex", bi_regex_noncallable, 0, -1, FB_RET_ANY, 0 });
+fb_global_bind(S, "regex", fb_object(S, RE, NULL));
+```
+
+```
+print(regex.findall("a1 b22 c333", "[0-9]+"))   # [1, 22, 333] -- no construction
+```
+
+A script-level `regex = ...` def still shadows the bind (defs resolve first).
+See `plugins/fbregex.c` for the full worked example.
 
 ## ABI stability
 

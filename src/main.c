@@ -94,14 +94,29 @@ int main(int ac, char **av) {
 
 	fb_State *S = fb_new();          /* inits the arena; find_script uses a_dup */
 
+	/* ::: splits fbuild's own flags (before it) from args forwarded verbatim
+	 * to the script (at and after it, `:::` included) — same separator
+	 * run_program() looks for when building the script's `args` list. Flags
+	 * below are only recognized strictly before the separator, so e.g.
+	 * `fbuild ::: --list-plugins` forwards --list-plugins to the script
+	 * instead of acting on it. */
+	int sep = ac;
+	for (int i = 1; i < ac; i++)
+		if (!strcmp(av[i], ":::")) { sep = i; break; }
+
 	/* --plugin PATH / --plugin=PATH : dlopen extensions before running, and
 	 * drop them from the args the script sees (compacted in place, no alloc).
 	 * --script PATH / --script=PATH : run PATH instead of the discovered
 	 * script (same arg-dropping treatment); FBUILD_SCRIPT env var is the
-	 * lower-precedence fallback for the same override. */
+	 * lower-precedence fallback for the same override.
+	 * --list-plugins : print the resolved plugin list (--plugin flags seen so
+	 * far, then $FBUILD_PLUGINS / $FBUILD_PLUGIN_PATH) and exit without running
+	 * anything. */
 	int fc = 1;
 	const char *script = NULL;
+	int list_plugins = 0;
 	for (int i = 1; i < ac; i++) {
+		if (i >= sep) { av[fc++] = av[i]; continue; }
 		const char *path = NULL;
 		if (!strcmp(av[i], "--plugin")) {
 			if (i + 1 >= ac) die("--plugin needs a path");
@@ -115,6 +130,9 @@ int main(int ac, char **av) {
 		} else if (!strncmp(av[i], "--script=", 9)) {
 			script = av[i] + 9;
 			continue;
+		} else if (!strcmp(av[i], "--list-plugins")) {
+			list_plugins = 1;
+			continue;
 		} else {
 			av[fc++] = av[i];
 			continue;
@@ -122,6 +140,14 @@ int main(int ac, char **av) {
 		if (fb_load_plugin(S, path)) die("%s", fb_error_msg(S));
 	}
 	if (!script) script = getenv("FBUILD_SCRIPT");
+
+	if (list_plugins) {
+		if (fb_load_env_plugins(S)) die("%s", fb_error_msg(S));
+		int n = fb_plugin_count(S);
+		for (int i = 0; i < n; i++) printf("%s\n", fb_plugin_path(S, i));
+		fb_close(S);
+		return 0;
+	}
 
 	fb_set_args(S, fc, av);
 	int rc = fb_dofile(S, script ? script : find_script());

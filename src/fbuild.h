@@ -124,6 +124,17 @@ void     fb_method(fb_State *S, fb_Class c, const char *name, fb_CFunction fn);
 fb_Value fb_object(fb_State *S, fb_Class c, void *data); /* instance + native data */
 void    *fb_object_data(fb_Value obj);               /* the native data (or NULL) */
 
+/* Bind `v` to a bare top-level identifier so scripts can reference it by name
+ * with no construction step, e.g. a stateless namespace object exposing only
+ * methods: fb_global_bind(S, "regex", fb_object(S, RegexCls, NULL)) makes
+ * `regex.findall(...)` work directly. Checked by identifier lookup ahead of
+ * the builtin registry; a script-level `def` of the same name still shadows
+ * it (defs are resolved first). Also register the name with fb_register (any
+ * fb_CFunction, e.g. one that fb_errors) so the type checker recognizes it —
+ * fb_global_bind alone does not make an identifier known to the checker.
+ * Last bind for a given name wins. */
+void     fb_global_bind(fb_State *S, const char *name, fb_Value v);
+
 /* ---- plugins ---------------------------------------------------------- */
 /* dlopen a plugin shared object and let it register builtins. The plugin must
  * export:
@@ -132,6 +143,20 @@ void    *fb_object_data(fb_Value obj);               /* the native data (or NULL
  * Load plugins BEFORE fb_dostring/fb_dofile so the type checker sees the names.
  * Returns 0 on success, non-zero on error (message in fb_error_msg). */
 int       fb_load_plugin(fb_State *S, const char *path);
+
+/* Load $FBUILD_PLUGINS (colon-separated .so paths), then every *.so directly
+ * inside each colon-separated directory of $FBUILD_PLUGIN_PATH (sorted by name,
+ * non-recursive). Idempotent per process. Normally triggered automatically by
+ * fb_dostring/fb_dofile before type-checking; call it directly to force env
+ * plugins to load without running a script (e.g. to list them). Returns 0 on
+ * success, non-zero on error (message in fb_error_msg). */
+int       fb_load_env_plugins(fb_State *S);
+
+/* Enumerate plugins loaded into S so far (via fb_load_plugin, directly or via
+ * fb_load_env_plugins), in load order. fb_plugin_path returns NULL if i is
+ * out of range. */
+int         fb_plugin_count(fb_State *S);
+const char *fb_plugin_path (fb_State *S, int i);
 
 /* Signatures a plugin's exported entry points must match. */
 typedef int (*fb_abi_fn)(void);

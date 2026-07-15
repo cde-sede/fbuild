@@ -18,7 +18,7 @@
 /* This TU owns the single static build_info (.my_metadata) that
  * fbuild_version() reads back, so it defines METADATA_LIST before the header
  * pulls in build.h. */
-#define FBUILD_VERSION "0.2.1"
+#define FBUILD_VERSION "0.2.2"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 
@@ -653,6 +653,9 @@ static void bind_params(renv *e, ast *params, rval *arg) {
  * because apply dispatches native callables (RV_CFUN) through g_active. */
 struct fb_class;
 #define FB_MAX_REG 10240   /* core builtins + host/plugin (full raylib ~660) */
+#define FB_MAX_BINDS 64    /* plugin-bound global identifiers (fb_global_bind) */
+
+typedef struct { const char *name; rval *v; } fb_bind;
 
 typedef struct {
 	def    defs[512]; size_t ndefs;
@@ -661,9 +664,12 @@ typedef struct {
 	int    in_run, bench;
 	char **print_q; size_t print_n, print_cap;
 	fb_Reg regs[FB_MAX_REG]; int nreg;
+	fb_bind binds[FB_MAX_BINDS]; int nbinds;
 	struct fb_class *classes;
 	rval  *spinner;
 } fb_globals;
+
+#define FB_MAX_PLUGINS 64
 
 struct fb_State {
 	jmp_buf   err_jmp;      /* protected-call boundary                     */
@@ -674,6 +680,7 @@ struct fb_State {
 	void     *arena;        /* this interpreter's durable arena (g_main)   */
 	void     *scratch;      /* per-iteration scratch arena (reclaimed)     */
 	fb_globals snap;        /* globals held while this state is inactive   */
+	const char *plugins[FB_MAX_PLUGINS]; int nplugins; /* fb_load_plugin() log */
 };
 struct fb_State *g_active;   /* the interpreter whose globals are live */
 static void fb_activate(struct fb_State *S);   /* make S's globals live */
@@ -753,6 +760,32 @@ const fb_Reg *fb_reg_find(const char *name) {
 }
 static const fb_Reg *fb_reg_find_tok(token *t) {
 	return t ? fb_reg_findn(t->string, t->len) : NULL;
+}
+
+static fb_bind g_binds[FB_MAX_BINDS];   /* live plugin globals (part of active state) */
+static int     g_nbinds;
+
+/* Bind `v` to a bare top-level identifier `name` (checked by AST_ID eval
+ * ahead of the builtin-registry fallback, so `name` reads as a plain value,
+ * e.g. a namespace object: `name.method(...)` with no script-side
+ * construction). Last bind wins if called again with the same name. */
+void fb_global_bind(fb_State *S, const char *name, fb_Value v) {
+	fb_activate(S);
+	for (int i = 0; i < g_nbinds; i++)
+		if (!strcmp(g_binds[i].name, name)) { g_binds[i].v = (rval *)v; return; }
+	if (g_nbinds < FB_MAX_BINDS) {
+		g_binds[g_nbinds].name = a_dup(name);
+		g_binds[g_nbinds].v = (rval *)v;
+		g_nbinds++;
+	} else {
+		fprintf(stderr, "fbuild: global bind table full (%d), dropped '%s'\n",
+		        FB_MAX_BINDS, name);
+	}
+}
+static rval *fb_bind_lookup(token *t) {
+	for (int i = 0; i < g_nbinds; i++)
+		if (tok_is(t, g_binds[i].name)) return g_binds[i].v;
+	return NULL;
 }
 
 /* value constructors */
@@ -1181,6 +1214,8 @@ rval *eval(ast *n, renv *e) {
 		if (tok_is(n->tok, "cwd")) return g_cwd;   /* CLI args list */
 		if (tok_is(n->tok, "_GLOBALS")) return store_globals();
 		if (tok_is(n->tok, "_SHARED"))  return store_shared();
+		rval *bv = fb_bind_lookup(n->tok);   /* plugin global (fb_global_bind) */
+		if (bv) return bv;
 		char *nm = dup_tok(n->tok);
 		if (is_builtin(nm)) {             /* a builtin used as a value */
 			rval *v = rv(RV_BUILTIN);
@@ -1612,6 +1647,7 @@ static void fb_gsave(struct fb_State *S) {
 	g->in_run = g_in_run; g->bench = g_bench;
 	g->print_q = g_print_q; g->print_n = g_print_n; g->print_cap = g_print_cap;
 	memcpy(g->regs, g_regs, sizeof g_regs); g->nreg = g_nreg;
+	memcpy(g->binds, g_binds, sizeof g_binds); g->nbinds = g_nbinds;
 	g->classes = g_classes; g->spinner = g_spinner;
 }
 /* load S's snapshot into the live globals */
@@ -1623,6 +1659,7 @@ static void fb_gload(struct fb_State *S) {
 	g_in_run = g->in_run; g_bench = g->bench;
 	g_print_q = g->print_q; g_print_n = g->print_n; g_print_cap = g->print_cap;
 	memcpy(g_regs, g->regs, sizeof g_regs); g_nreg = g->nreg;
+	memcpy(g_binds, g->binds, sizeof g_binds); g_nbinds = g->nbinds;
 	g_classes = g->classes; g_spinner = g->spinner;
 }
 static void fb_activate(struct fb_State *S) {
@@ -1660,7 +1697,7 @@ void fb_set_args(fb_State *S, int argc, char **argv) {
 
 const char *fb_error_msg(fb_State *S) { return S->err_msg; }
 
-static int fb_load_env_plugins(fb_State *S);
+int fb_load_env_plugins(fb_State *S);   /* public: see fbuild.h */
 
 int fb_dostring(fb_State *S, const char *src, const char *chunkname) {
 	(void)chunkname;
@@ -1741,18 +1778,62 @@ int fb_load_plugin(fb_State *S, const char *path) {
 		dlclose(h); return 1;
 	}
 	/* keep h open for the process lifetime: registered fns point into it */
+	if (S->nplugins < FB_MAX_PLUGINS) S->plugins[S->nplugins++] = a_dup(path);
 	return 0;
 }
 
-/* Load colon-separated plugin paths from $FBUILD_PLUGINS (once). */
-static int fb_load_env_plugins(fb_State *S) {
+int fb_plugin_count(fb_State *S) { return S->nplugins; }
+const char *fb_plugin_path(fb_State *S, int i) {
+	return (i >= 0 && i < S->nplugins) ? S->plugins[i] : NULL;
+}
+
+/* Load every *.so in `dir` (non-recursive, sorted for determinism). Reads the
+ * directory with getdents64, matching glob_walk's convention. */
+static int fb_load_dir_plugins(fb_State *S, const char *dir) {
+	int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (fd < 0) { snprintf(S->err_msg, sizeof S->err_msg, "FBUILD_PLUGIN_PATH: cannot open '%s'", dir); return 1; }
+	char *names[256]; int nn = 0;
+	char buf[8192];
+	for (;;) {
+		long n = syscall(SYS_getdents64, fd, buf, sizeof buf);
+		if (n <= 0) break;
+		for (long off = 0; off < n; ) {
+			struct glob_dirent64 *e = (struct glob_dirent64 *)(buf + off);
+			off += e->d_reclen;
+			size_t l = strlen(e->d_name);
+			if (l > 3 && !strcmp(e->d_name + l - 3, ".so") && nn < 256)
+				names[nn++] = a_dup(e->d_name);
+		}
+	}
+	close(fd);
+	for (int i = 0; i < nn; i++)
+		for (int j = i + 1; j < nn; j++)
+			if (strcmp(names[i], names[j]) > 0) { char *t = names[i]; names[i] = names[j]; names[j] = t; }
+	for (int i = 0; i < nn; i++) {
+		char path[4096];
+		joinp(path, sizeof path, dir, names[i]);
+		if (fb_load_plugin(S, path)) return 1;
+	}
+	return 0;
+}
+
+/* Load colon-separated plugin paths from $FBUILD_PLUGINS, then every *.so
+ * under colon-separated directories in $FBUILD_PLUGIN_PATH (once, in that order). */
+int fb_load_env_plugins(fb_State *S) {
 	static int done = 0;
 	if (done) return 0;
 	done = 1;
 	const char *env = getenv("FBUILD_PLUGINS");
-	if (!env || !*env) return 0;
-	char *list = a_dup(env), *save = NULL;
-	for (char *t = strtok_r(list, ":", &save); t; t = strtok_r(NULL, ":", &save))
-		if (fb_load_plugin(S, t)) return 1;
+	if (env && *env) {
+		char *list = a_dup(env), *save = NULL;
+		for (char *t = strtok_r(list, ":", &save); t; t = strtok_r(NULL, ":", &save))
+			if (fb_load_plugin(S, t)) return 1;
+	}
+	const char *dirs = getenv("FBUILD_PLUGIN_PATH");
+	if (dirs && *dirs) {
+		char *list = a_dup(dirs), *save = NULL;
+		for (char *t = strtok_r(list, ":", &save); t; t = strtok_r(NULL, ":", &save))
+			if (fb_load_dir_plugins(S, t)) return 1;
+	}
 	return 0;
 }
