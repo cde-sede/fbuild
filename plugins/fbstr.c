@@ -111,6 +111,22 @@ static fb_Value bi_chars(fb_State *S, fb_Value *a, int n) {
 	for (; *s; s++) { char c[2] = { *s, '\0' }; fb_push(S, list, fb_str(S, c)); }
 	return list;
 }
+/* substr(s, start[, end]) -> String: [start,end) byte range, neg counts from
+ * end (mirrors fbloop's slice()). end defaults to the string's length. */
+static fb_Value bi_substr(fb_State *S, fb_Value *a, int n) {
+	const char *s = P(a[0]);
+	long len = (long)strlen(s);
+	long start = fb_toint(a[1]);
+	long end = n >= 3 ? fb_toint(a[2]) : len;
+	if (start < 0) start += len;
+	if (end < 0) end += len;
+	if (start < 0) start = 0;
+	if (end > len) end = len;
+	if (end < start) end = start;
+	size_t l = (size_t)(end - start);
+	char *b = malloc(l + 1); memcpy(b, s + start, l); b[l] = '\0';
+	fb_Value r = fb_str(S, b); free(b); return r;
+}
 static fb_Value bi_replace(fb_State *S, fb_Value *a, int n) {
 	(void)n; const char *s = P(a[0]), *from = P(a[1]), *to = P(a[2]);
 	if (!*from) return fb_str(S, s);
@@ -163,6 +179,7 @@ int fbuild_open(fb_State *S) {
 		{ "find",         bi_find,         2, 2, FB_RET_INT,  0 },
 		{ "repeat",       bi_repeat,       2, 2, FB_RET_STR,  0 },
 		{ "chars",        bi_chars,        1, 1, FB_RET_LIST, 0 },
+		{ "substr",       bi_substr,       2, 3, FB_RET_STR,  0 },
 		{ "replace",      bi_replace,      3, 3, FB_RET_STR,  0 },
 		{ "pad_left",     bi_pad_left,     2, 3, FB_RET_STR,  0 },
 		{ "pad_right",    bi_pad_right,    2, 3, FB_RET_STR,  0 },

@@ -13,6 +13,7 @@ typedef enum {
 	                /* kids[1]=rhs; writes into a _GLOBALS slot     */
 	AST_FORCE,      /* tok = "~", kids[0]=operand; re-eval, no memo */
 	AST_TUPLE,      /* kids = elements (>= 2)                      */
+	AST_LISTLIT,    /* kids = elements; List<e, ...> -> a real List */
 	AST_MAPLIT,     /* kids = entries, each AST_TUPLE(key,value)   */
 	AST_PARSER,     /* kids[0] = schema map; Parser<schema>(argv)  */
 	AST_LAMBDA,     /* kids[0]=AST_PARAMS, kids[1]=body            */
@@ -51,6 +52,7 @@ typedef enum {
 	AST_INT,        /* tok                                         */
 	AST_FLOAT,      /* tok                                         */
 	AST_BOOL,       /* tok = "true" / "false"                      */
+	AST_NIL,        /* tok = "nil" | "(" ; the Unit value           */
 	AST_STRING,     /* tok (plain) | kids = parts (interpolated)   */
 	AST_STRTEXT,    /* tok = literal text chunk in an interp string*/
 	AST_PATH,       /* tok                                         */

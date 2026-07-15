@@ -530,6 +530,10 @@ void lex(char *s)
 			         !strncmp(s + start, "false", 5))
 				kind = TOK_BOOL;
 
+			else if (len == 3 &&
+			         !strncmp(s + start, "nil", 3))
+				kind = TOK_NIL;
+
 			emit(kind,
 			     s + start,
 			     len,
@@ -675,6 +679,7 @@ const char *ast_name[] = {
 	[AST_STORE]="store",
 	[AST_FORCE]="force",
 	[AST_TUPLE]="tuple",
+	[AST_LISTLIT]="listlit",
 	[AST_MAPLIT]="maplit",
 	[AST_PARSER]="parser",
 	[AST_LAMBDA]="lambda",
@@ -707,6 +712,7 @@ const char *ast_name[] = {
 	[AST_INT]="int",
 	[AST_FLOAT]="float",
 	[AST_BOOL]="bool",
+	[AST_NIL]="nil",
 	[AST_STRING]="string",
 	[AST_STRTEXT]="strtext",
 	[AST_PATH]="path",
@@ -846,6 +852,7 @@ static ast *parse_atom(void) {
 	case TOK_INT:   { ast *n = node(AST_INT);    n->tok = t; tok_advance(); return n; }
 	case TOK_FLOAT: { ast *n = node(AST_FLOAT);  n->tok = t; tok_advance(); return n; }
 	case TOK_BOOL:  { ast *n = node(AST_BOOL);   n->tok = t; tok_advance(); return n; }
+	case TOK_NIL:   { ast *n = node(AST_NIL);    n->tok = t; tok_advance(); return n; }
 	case TOK_STRING:{ ast *n = node(AST_STRING); n->tok = t; tok_advance(); return n; }
 	case TOK_PATH:  { ast *n = node(AST_PATH);   n->tok = t; tok_advance(); return n; }
 
@@ -858,7 +865,17 @@ static ast *parse_atom(void) {
 				skip_nl();
 				if (peek(.kind = TOK_RBRACE)) break;   /* trailing comma */
 				ast *entry = node(AST_TUPLE);
-				push(entry, parse_expr_no_tuple());    /* key */
+				ast *key = parse_expr_no_tuple();       /* key */
+				if (key->kind == AST_ID) {
+					/* a bare word key is always its own literal text -- never a
+					 * variable lookup. An outer binding sharing the word's name
+					 * must not silently turn it into a computed key; write
+					 * `"{expr}"` for an actually computed key. */
+					ast *lit = node(AST_STRING);
+					lit->tok = key->tok;
+					key = lit;
+				}
+				push(entry, key);
 				skip_nl();
 				expect(.kind = TOK_COLON);
 				skip_nl();
@@ -872,8 +889,27 @@ static ast *parse_atom(void) {
 		return n;
 	}
 
-	case TOK_LPAREN: {                   /* "(" expression ")" */
+	case TOK_LPAREN: {                   /* "(" expression ")" | "()" nil | "() -> body" */
 		tok_advance();
+		skip_nl();
+		if (peek(.kind = TOK_RPAREN)) {
+			if (_match((struct obj){ .kind = TOK_ARROW }, cur + 1)) {
+				/* "() -> body": explicit zero-arity lambda. */
+				tok_advance();                  /* ")" */
+				skip_nl();
+				expect(.kind = TOK_ARROW);
+				skip_nl();
+				ast *lam = node(AST_LAMBDA);
+				push(lam, node(AST_PARAMS));    /* no parameters */
+				push(lam, parse_expression());
+				return lam;
+			}
+			/* "()": the Unit literal (same value "nil" produces). */
+			ast *nilv = node(AST_NIL);
+			nilv->tok = tok_cur();
+			tok_advance();                       /* ")" */
+			return nilv;
+		}
 		ast *n = parse_expression();
 		expect(.kind = TOK_RPAREN);
 		if (n->kind == AST_SPLAT) {  /* (...x): materialize the spread tuple */
@@ -991,6 +1027,23 @@ static int constructor_ahead(void) {
 	return 0;
 }
 
+/* Consume a generic bracket's closing ">". ">>" lexes as one TOK_SEQ token
+ * (maximal munch, same ambiguity C++ had pre-11), so a nested close like
+ * `List<List<1,2>>` needs the first ">" split off in place: shrink the
+ * token to just its leading byte without advancing the cursor, so the
+ * trailing ">" is still there as the next token for the enclosing close. */
+static void expect_gt(void) {
+	if (peek(.kind = TOK_GT)) { tok_advance(); return; }
+	if (peek(.kind = TOK_SEQ)) {
+		token *t = tok_cur();
+		t->kind = TOK_GT;
+		t->len = 1;
+		t->owned = NULL;
+		return;
+	}
+	expect(.kind = TOK_GT);   /* not a match either way: normal error path */
+}
+
 /* constructor: identifier "<" [ constructor-fields ] ">"
  * field values stay below comparison so a "<" / ">" cannot be mistaken for
  * the closing bracket. */
@@ -1013,7 +1066,7 @@ static ast *parse_constructor(ast *base) {
 			push(n, f);
 		} while (accept(.kind = TOK_COMMA));
 	}
-	expect(.kind = TOK_GT);
+	expect_gt();
 	return n;
 }
 
@@ -1036,7 +1089,32 @@ static ast *parse_tuple_ctor(ast *base) {
 			skip_nl();
 		} while (accept(.kind = TOK_COMMA));
 	}
-	expect(.kind = TOK_GT);
+	expect_gt();
+	return n;
+}
+
+/* List<e, ..., *...spread>: build a real List from positional values and
+ * splats. Same element grammar as Tuple<>, but AST_LISTLIT evals to RV_LIST
+ * instead of RV_TUPLE (see run.c) -- an actual list literal, not sugar over
+ * the seq-promotion-via-|> workaround. */
+static ast *parse_list_ctor(ast *base) {
+	ast *n = node(AST_LISTLIT);
+	ast_free(base);
+	expect(.kind = TOK_LT);
+	if (!peek(.kind = TOK_GT)) {
+		do {
+			skip_nl();
+			if (accept(.kind = TOK_SPLAT)) {
+				ast *s = node(AST_SPLAT);
+				push(s, parse_postfix());
+				push(n, s);
+			} else {
+				push(n, parse_postfix());
+			}
+			skip_nl();
+		} while (accept(.kind = TOK_COMMA));
+	}
+	expect_gt();
 	return n;
 }
 
@@ -1049,7 +1127,7 @@ static ast *parse_parser_ctor(ast *base) {
 	skip_nl();
 	push(n, parse_postfix());   /* schema map (postfix, so '>' isn't a compare) */
 	skip_nl();
-	expect(.kind = TOK_GT);
+	expect_gt();
 	return n;
 }
 
@@ -1067,7 +1145,7 @@ static ast *parse_map_ctor(ast *base) {
 			skip_nl();
 		} while (accept(.kind = TOK_COMMA));
 	}
-	expect(.kind = TOK_GT);
+	expect_gt();
 	return n;
 }
 
@@ -1084,6 +1162,10 @@ static ast *parse_postfix(void) {
 		           base->tok->len == 5 &&
 		           !strncmp(base->tok->string, "Tuple", 5)) {
 			base = parse_tuple_ctor(base);    /* Tuple<...> -> a tuple */
+		} else if (base->kind == AST_ID && peek(.kind = TOK_LT) &&
+		           base->tok->len == 4 &&
+		           !strncmp(base->tok->string, "List", 4)) {
+			base = parse_list_ctor(base);     /* List<...> -> a list */
 		} else if (base->kind == AST_ID && peek(.kind = TOK_LT) &&
 		           base->tok->len == 3 &&
 		           !strncmp(base->tok->string, "Map", 3)) {

@@ -18,6 +18,7 @@ char *AST_NODE_NAMES[] = {
 	[AST_EAGER] = "AST_EAGER",
 	[AST_FORCE] = "AST_FORCE",
 	[AST_TUPLE] = "AST_TUPLE",
+	[AST_LISTLIT] = "AST_LISTLIT",
 	[AST_MAPLIT] = "AST_MAPLIT",
 	[AST_PARSER] = "AST_PARSER",
 	[AST_LAMBDA] = "AST_LAMBDA",
@@ -53,6 +54,7 @@ char *AST_NODE_NAMES[] = {
 	[AST_INT] = "AST_INT",
 	[AST_FLOAT] = "AST_FLOAT",
 	[AST_BOOL] = "AST_BOOL",
+	[AST_NIL] = "AST_NIL",
 	[AST_STRING] = "AST_STRING",
 	[AST_STRTEXT] = "AST_STRTEXT",
 	[AST_PATH] = "AST_PATH",
@@ -664,6 +666,7 @@ static obj_type *infer(ast *node, scope *sc) {
 	case AST_INT:    t = t_new(RET_INT);    break;
 	case AST_FLOAT:  t = t_new(RET_FLOAT);  break;
 	case AST_BOOL:   t = t_new(RET_BOOL);   break;
+	case AST_NIL:    t = t_new(RET_VAR);    break;   /* unifies with anything */
 	case AST_STRTEXT: t = t_new(RET_STRING); break;
 	case AST_STRING:                                 /* visit {expr} parts */
 		for (size_t i = 0; i < node->nkids; i++)
@@ -722,28 +725,16 @@ static obj_type *infer(ast *node, scope *sc) {
 		break;
 	}
 
-	case AST_LOGICAL: {                  /* and/or: Bool x Bool -> Bool;  ||: value-or */
-		obj_type *l = infer(node->kids[0], sc);
-		obj_type *r = infer(node->kids[1], sc);
-		if (node->tok->kind == TOK_OROR) {   /* left if truthy else right: any -> ? */
-			t = t_new(RET_VAR);
-			break;
-		}
-		if (l->ret != RET_BOOL && l->ret != RET_VAR)
-			type_err(node->tok, "'%.*s' operand must be Bool, got %s",
-			         (int)node->tok->len, node->tok->string, ret_kind_name(l->ret));
-		if (r->ret != RET_BOOL && r->ret != RET_VAR)
-			type_err(node->tok, "'%.*s' operand must be Bool, got %s",
-			         (int)node->tok->len, node->tok->string, ret_kind_name(r->ret));
-		t = t_new(RET_BOOL);
+	case AST_LOGICAL: {                  /* and/or/|| : any type, runtime truthy() decides */
+		infer(node->kids[0], sc);
+		infer(node->kids[1], sc);
+		/* ||  is value-or (keeps operand type); and/or coerce to Bool at runtime */
+		t = t_new(node->tok->kind == TOK_OROR ? RET_VAR : RET_BOOL);
 		break;
 	}
 
-	case AST_NOT: {                      /* not : Bool -> Bool */
-		obj_type *o = infer(node->kids[0], sc);
-		if (o->ret != RET_BOOL && o->ret != RET_VAR)
-			type_err(node->tok, "'not' operand must be Bool, got %s",
-			         ret_kind_name(o->ret));
+	case AST_NOT: {                      /* not : any -> Bool (runtime truthy()) */
+		infer(node->kids[0], sc);
 		t = t_new(RET_BOOL);
 		break;
 	}
@@ -753,6 +744,16 @@ static obj_type *infer(ast *node, scope *sc) {
 		for (size_t i = 0; i < node->nkids; i++)
 			k[i] = infer(node->kids[i], sc);
 		t = t_compound(RET_TUPLE, node->nkids, k);
+		break;
+	}
+
+	case AST_LISTLIT: {              /* List<e, ...> : homogeneous element type */
+		obj_type *elem = t_new(RET_VAR);
+		for (size_t i = 0; i < node->nkids; i++) {
+			obj_type *ei = infer(node->kids[i], sc);
+			elem = (i == 0) ? ei : (unify(elem, ei) ? elem : t_new(RET_VAR));
+		}
+		t = t_list(elem);
 		break;
 	}
 
@@ -795,12 +796,8 @@ static obj_type *infer(ast *node, scope *sc) {
 				scope_put(&gs, bd->tok, infer(bd->kids[0], &gs));
 			}
 		scope *bsc = where ? &gs : sc;
-		if (whenc) {                        /* condition must be Bool */
-			obj_type *ct = infer(whenc->kids[0], bsc);
-			if (ct->ret != RET_BOOL && ct->ret != RET_VAR)
-				type_err(NULL, "when condition must be Bool, got %s",
-				         ret_kind_name(ct->ret));
-		}
+		if (whenc)                          /* any type: runtime truthy() decides */
+			infer(whenc->kids[0], bsc);
 		t = infer(node->kids[0], bsc);
 		break;
 	}
@@ -995,6 +992,16 @@ static void check_recursion(token *name, ast *node, int guarded) {
 			check_recursion(name, node->kids[1], guarded);
 		if (node->kids[2])                      /* when condition */
 			check_recursion(name, node->kids[2], guarded);
+		return;
+	}
+
+	/* `(a when c) || b`: reaching b proves c (and thus a) didn't fire -- the
+	 * language's documented if/else idiom (SKILLS.md). Treat the right side
+	 * of || as guarded the same way a `when` body is, so a self-call in the
+	 * "else" branch of that idiom doesn't false-positive. */
+	if (node->kind == AST_LOGICAL && node->tok->kind == TOK_OROR) {
+		check_recursion(name, node->kids[0], guarded);
+		check_recursion(name, node->kids[1], 1);
 		return;
 	}
 

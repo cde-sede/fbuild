@@ -40,6 +40,7 @@ typedef enum {
 	TOK_INT,
 	TOK_FLOAT,
 	TOK_BOOL,       // true / false
+	TOK_NIL,        // nil (Unit literal; "()" is the other spelling)
 	TOK_STRING,
 	TOK_BACKTICK,   // `  command literal delimiter
 	TOK_COMMAND,

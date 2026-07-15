@@ -11,7 +11,7 @@ recursive-descent parser. For what the builtins/values *mean*, see `SKILLS.md`.
 - **Identifier**: `[A-Za-z_][A-Za-z0-9_]*`.
 - **Integer**: `[0-9]+`.  **Float**: `[0-9]+.[0-9]+`.
 - **Boolean**: `true` `false`.
-- **Keywords**: `when` `where` `and` `or` `not`. (`true`/`false` too.) Everything
+- **Keywords**: `when` `where` `and` `or` `not`. (`true`/`false`/`nil` too.) Everything
   else that looks like an identifier is an identifier.
 - **String**: `'...'` or `"..."`. Backslash escapes `\<char>`. A string may
   **interpolate** with `{ expr }`: `"out/{name}.o"`. A `#` inside a string is text.
@@ -76,10 +76,12 @@ unbound.
 identifier          NAME
 number              42   3.14
 boolean             true   false
+nil                 nil    ()                (the Unit value; both spellings identical)
 string              'x'   "out/{e}.o"
 command             `cc -c {.s}`
 path                [src/*.c]
 ( e )               grouping
+() -> body          explicit zero-arity lambda (vs. "()" alone, which is nil)
 capture             @        @name        (binds the call's argument / rest)
 projection          .name    .0           (field/index of the implicit arg)
 metadata            &e
@@ -97,6 +99,7 @@ parser              Parser<schema>         (schema is a map; see SKILLS.md)
 File<*base>                     inherit from a path/File, autofill fields
 File<*f, name=e, suffix=e>      override fields (name/stem/suffix/parent)
 Tuple<a, ...xs, b>              tuple from values + splats
+List<a, ...xs, b>               real list from values + splats
 Map<(k, v), (k2, v2)>           map from key/value pairs
 { "k": v, k2: e }              map literal (sugar for Map)
 Parser<{ "flag": "bool", ... }>  CLI arg parser (see SKILLS.md)

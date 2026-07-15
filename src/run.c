@@ -18,7 +18,7 @@
 /* This TU owns the single static build_info (.my_metadata) that
  * fbuild_version() reads back, so it defines METADATA_LIST before the header
  * pulls in build.h. */
-#define FBUILD_VERSION "0.2.0"
+#define FBUILD_VERSION "0.2.1"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 
@@ -309,7 +309,7 @@ static void tuple_add(rval *t, ast *el, renv *e) {
 		}
 		if (whenc) {
 			rval *c = eval(whenc->kids[0], bsc);
-			if (!(c->k == RV_BOOL && c->i))     /* gated out */
+			if (!truthy(c))                     /* gated out */
 				return;
 		}
 		tuple_add(t, el->kids[0], bsc);
@@ -1106,6 +1106,7 @@ rval *eval(ast *n, renv *e) {
 	case AST_INT:    return rv_int(strtol(n->tok->string, NULL, 10));
 	case AST_FLOAT:  return rv_float(strtod(a_dupn(n->tok->string, n->tok->len), NULL));
 	case AST_BOOL:   return rv_bool(n->tok->len == 4);   /* "true" vs "false" */
+	case AST_NIL:    return &RV_UNIT;
 	case AST_STRTEXT: return rv_str(str_unescape(n->tok->string, n->tok->len));
 	case AST_STRING: {
 		if (n->nkids == 0)                       /* plain string */
@@ -1211,6 +1212,13 @@ rval *eval(ast *n, renv *e) {
 		return t;
 	}
 
+	case AST_LISTLIT: {                    /* List<e, ...> : a real list literal */
+		rval *t = rv(RV_LIST);
+		for (size_t i = 0; i < n->nkids; i++)
+			tuple_add(t, n->kids[i], e);
+		return t;
+	}
+
 	case AST_MAPLIT: {                     /* { k: v } and Map<(k,v),...> */
 		rval *m = rv(RV_MAP);
 		for (size_t i = 0; i < n->nkids; i++) {
@@ -1268,7 +1276,7 @@ rval *eval(ast *n, renv *e) {
 		}
 		if (whenc) {
 			rval *c = eval(whenc->kids[0], bsc);
-			if (!(c->k == RV_BOOL && c->i))    /* gate */
+			if (!truthy(c))                    /* gate */
 				return &RV_UNIT;
 		}
 		return eval(n->kids[0], bsc);

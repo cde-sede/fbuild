@@ -10,6 +10,7 @@ Int  Float  String  Bool  Path  File  Command  Unit
 List<a>  Tuple<a,b,..>  (a -> b)
 Map  Json                              JSON object / dynamic value
 true  false                            Bool literals
+nil  ()                                Unit literal (both spellings, same value)
 ```
 
 ## operators
@@ -34,16 +35,20 @@ true  false                            Bool literals
                        % on a Float pair uses fmod (C's %, not floor-mod).
 -e                     (Int|Float) -> Int|Float   unary negation
 < > <= >= == !=        a -> a -> Bool             (Int/Float compare cross-type)
-and or                 Bool -> Bool -> Bool
+and or                 a -> a -> Bool    any type; runtime truthy() decides (not Bool-only)
 ||                     a -> b -> (a|b)   value-or: left if truthy else right
-not                    Bool -> Bool
+not                    a -> Bool         any type; runtime truthy() decides
 where : e where n = v, ...   local bindings for e (let); sequential (later see earlier)
-when  : e when cond          gate: e if cond else () (unit, falsy)
+when  : e when cond          gate: e if cond else nil; cond can be any type (truthy())
 ```
 Guard tail on an expression: `e where <binds> when <cond>` (where first, so the
 `when` can use the bindings). `where` names things; `when` gates the whole thing.
-Common if/else idiom (since `when` yields `()` when false):
+Common if/else idiom (since `when` yields `nil` when false):
 `x = (a when cond) || b`  — a if cond else b.
+`nil`/`()` is the only Unit value: `x == nil` is the reliable way to test whether
+a guard fired. `() -> body` is an explicit zero-arity lambda (distinguished from
+the `()` literal by the `->` immediately after); `@ -> body` also works as an
+n-ary-ignoring lambda if arity truly doesn't matter.
 
 ## construct
 
@@ -51,13 +56,17 @@ Common if/else idiom (since `when` yields `()` when false):
 File<*[path]>                   inherit, autofill name/stem/suffix/parent
 File<*f, name=expr>             override field
 Tuple<a, ...xs, b>              build a tuple from values + splats
+List<a, ...xs, b>               build a real List from values + splats
 Map<(k,v), (k2,v2), ...>        build a map from key/value pairs
 { "k": v, k2: v2 }              map literal (sugar); keys: string or bare word
 (...xs)                         splat materialized as a tuple
 seq |> e -> e                   any sequence -> List (promotion)
 ```
 Map is an intrinsic type (was `map()`, now removed). `{}` is the empty map.
-Bare-word keys are literal unless the word is a bound variable (then computed key).
+A bare-word key is always its own literal text, even if a same-named variable
+is in scope (no accidental computed-key shadowing) -- parens don't change this,
+`(name)` parses down to the same identifier. For an actually computed key, use
+a string interpolation: `"{expr}": v`.
 
 ## custom objects
 
@@ -194,6 +203,7 @@ ends_with  : String -> String -> Bool
 find       : String -> String -> Int    substring index or -1
 repeat     : String -> Int -> String
 chars      : String -> List<String>     split into characters
+substr     : String -> Int -> Int? -> String   [start,end) byte range, neg from end
 to_int     : String|Int|Float -> Int      truncates a Float
 to_float   : String|Int|Float -> Float
 to_str     : a -> String
@@ -227,7 +237,7 @@ values      : Map -> List<Json>
 items       : Map -> List<Tuple<String,Json>>    iterate: m |> (k,v -> ..)
 m.key   m.{expr}                       field access on a Map
 ```
-object -> Map, array -> List, number -> Int|String(real), bool -> Bool, null -> ()
+object -> Map, array -> List, number -> Int|Float(real), bool -> Bool, null -> ()
 
 ## vars
 
