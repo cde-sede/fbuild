@@ -6,7 +6,7 @@ in `SYNTAX.md`. This file covers types, builtins, and semantics.
 ## types
 
 ```
-Int  String  Bool  Path  File  Command  Unit
+Int  Float  String  Bool  Path  File  Command  Unit
 List<a>  Tuple<a,b,..>  (a -> b)
 Map  Json                              JSON object / dynamic value
 true  false                            Bool literals
@@ -29,8 +29,11 @@ true  false                            Bool literals
 .f   : record.field
 .{e} : record.{expr}   dynamic field / index
 {e}  : "..{expr}.."    interpolation (strings + commands)
-+ - * / %              Int -> Int -> Int
-< > <= >= == !=        a -> a -> Bool
++ - * / %              (Int|Float) -> (Int|Float) -> Int|Float
+                       Float if either operand is Float, else Int.
+                       % on a Float pair uses fmod (C's %, not floor-mod).
+-e                     (Int|Float) -> Int|Float   unary negation
+< > <= >= == !=        a -> a -> Bool             (Int/Float compare cross-type)
 and or                 Bool -> Bool -> Bool
 ||                     a -> b -> (a|b)   value-or: left if truthy else right
 not                    Bool -> Bool
@@ -191,7 +194,8 @@ ends_with  : String -> String -> Bool
 find       : String -> String -> Int    substring index or -1
 repeat     : String -> Int -> String
 chars      : String -> List<String>     split into characters
-to_int     : String -> Int
+to_int     : String|Int|Float -> Int      truncates a Float
+to_float   : String|Int|Float -> Float
 to_str     : a -> String
 ```
 

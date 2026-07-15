@@ -62,9 +62,10 @@ unbound.
 8. **comparison** `< > <= >= == !=`
 9. **additive** `+ -`
 10. **multiplicative** `* / %`
-11. **postfix**: call `f(a, b)`, field `.name` / `.0`, dynamic field `.{e}`,
+11. **unary** `-e` (numeric negation; e.g. `a - -b`, `-1.5`)
+12. **postfix**: call `f(a, b)`, field `.name` / `.0`, dynamic field `.{e}`,
     constructor `T<...>`, morphism `path // path`
-12. **atom** (below)
+13. **atom** (below)
 
 `and`/`or`/`||` short-circuit; `||` is value-or (left if truthy, else right).
 `when` evaluates the condition first and skips the body when false.

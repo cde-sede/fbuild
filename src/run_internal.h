@@ -31,6 +31,8 @@
 #include <fcntl.h>
 #include <ctype.h>
 #include <time.h>
+#include <math.h>
+#include <string.h>
 
 typedef void* voidptr;
 typedef DECL_DA(voidptr) t_da_voidptr;
@@ -66,7 +68,7 @@ extern char **environ;
 /* ---- runtime values --------------------------------------------------- */
 
 typedef enum {
-	RV_NONE, RV_INT, RV_STR, RV_BOOL,
+	RV_NONE, RV_INT, RV_FLOAT, RV_STR, RV_BOOL,
 	RV_FILE,        /* a path (.s) + lazily derived fields                */
 	RV_LIST,        /* independent items (glob / |> map) -> parallel      */
 	RV_SEQ,         /* ordered dependency (>>) -> sequential              */
@@ -86,6 +88,7 @@ typedef struct renv renv;
 struct rval {
 	rkind   k;
 	long    i;          /* int / bool                          */
+	double  f;          /* float                                */
 	char   *s;          /* string / file path                  */
 	rval  **items;      /* list / tuple / cmd args; map values */
 	char  **keys;       /* map keys, parallel to items         */
@@ -124,6 +127,7 @@ static inline rval *rv(rkind k) {
 	return v;
 }
 static inline rval *rv_int(long i)  { rval *v = rv(RV_INT);  v->i = i; return v; }
+static inline rval *rv_float(double d) { rval *v = rv(RV_FLOAT); v->f = d; return v; }
 static inline rval *rv_bool(int b)  { rval *v = rv(RV_BOOL); v->i = !!b; return v; }
 static inline rval *rv_str(char *s) { rval *v = rv(RV_STR);  v->s = s; return v; }
 static inline rval *rv_file(char *s){ rval *v = rv(RV_FILE); v->s = s; return v; }
@@ -154,6 +158,7 @@ char       *subst_a(const char *from, const char *to, const char *s);
 void        map_set(rval *m, char *key, rval *val);
 rval       *map_get(rval *m, const char *key);
 char       *as_cstr(rval *v);
+char       *fmt_double(double d);
 const char *pstr(rval *v);
 int         truthy(rval *v);
 int         is_seq(rval *v);

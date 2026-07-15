@@ -18,7 +18,7 @@
 /* This TU owns the single static build_info (.my_metadata) that
  * fbuild_version() reads back, so it defines METADATA_LIST before the header
  * pulls in build.h. */
-#define FBUILD_VERSION "0.1.18"
+#define FBUILD_VERSION "0.2.0"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 
@@ -101,6 +101,20 @@ static long tok_index(token *t) {
 	return v;
 }
 
+/* render a double the way funcbuild prints Floats: shortest round-trip form,
+ * but always with a '.' (or exponent) so it stays visually distinct from an
+ * Int (2.0, never bare 2). */
+char *fmt_double(double d) {
+	char *b = a_alloc(32);
+	snprintf(b, 32, "%.15g", d);
+	if (!strpbrk(b, ".en")) {           /* no '.', no exponent, no nan/inf */
+		size_t n = strlen(b);
+		b = a_grow(b, n + 1, n + 3);
+		b[n] = '.'; b[n+1] = '0'; b[n+2] = '\0';
+	}
+	return b;
+}
+
 /* a runtime value rendered as a command-line argument */
 char *as_cstr(rval *v) {
 	if (!v) return "";
@@ -109,9 +123,14 @@ char *as_cstr(rval *v) {
 	case RV_FILE: return v->s ? v->s : "";
 	case RV_INT:
 	case RV_BOOL: { char *b = a_alloc(24); snprintf(b, 24, "%ld", v->i); return b; }
+	case RV_FLOAT: return fmt_double(v->f);
 	default:      return "";
 	}
 }
+
+/* numeric value as a double, promoting Int/Bool; used by arithmetic/compare
+ * once either operand is a Float. */
+static double as_dbl(rval *v) { return v->k == RV_FLOAT ? v->f : (double)v->i; }
 
 /* ---- environment ------------------------------------------------------ */
 
@@ -739,13 +758,16 @@ static const fb_Reg *fb_reg_find_tok(token *t) {
 /* value constructors */
 fb_Value fb_nil (fb_State *S)              { (void)S; return (fb_Value)&RV_UNIT; }
 fb_Value fb_int (fb_State *S, long v)      { (void)S; return (fb_Value)rv_int(v); }
+fb_Value fb_float(fb_State *S, double v)   { (void)S; return (fb_Value)rv_float(v); }
 fb_Value fb_bool(fb_State *S, int v)       { (void)S; return (fb_Value)rv_bool(v); }
 fb_Value fb_str (fb_State *S, const char *s){ (void)S; return (fb_Value)rv_str(a_dup(s ? s : "")); }
 fb_Value fb_file(fb_State *S, const char *p){ (void)S; return (fb_Value)rv_file(a_dup(p ? p : "")); }
 fb_Value fb_list(fb_State *S)              { (void)S; return (fb_Value)rv(RV_LIST); }
+fb_Value fb_tuple(fb_State *S)             { (void)S; return (fb_Value)rv(RV_TUPLE); }
 fb_Value fb_map (fb_State *S)              { (void)S; return (fb_Value)rv(RV_MAP); }
 fb_Value fb_cmd (fb_State *S)              { (void)S; return (fb_Value)rv(RV_CMD); }
 void     fb_push(fb_State *S, fb_Value l, fb_Value e) { (void)S; rv_push((rval*)l, (rval*)e); }
+void     fb_tuple_push(fb_State *S, fb_Value t, fb_Value e) { (void)S; rv_push((rval*)t, (rval*)e); }
 void     fb_cmd_push(fb_State *S, fb_Value c, fb_Value w) { (void)S; rv_push((rval*)c, (rval*)w); }
 void     fb_set (fb_State *S, fb_Value m, const char *k, fb_Value v) {
 	(void)S; map_set((rval*)m, a_dup(k ? k : ""), (rval*)v);
@@ -767,6 +789,7 @@ fb_Kind fb_kind(fb_Value v) {
 	switch (r->k) {
 	case RV_NONE:   return FB_NIL;
 	case RV_INT:    return FB_INT;
+	case RV_FLOAT:  return FB_FLOAT;
 	case RV_STR:    return FB_STR;
 	case RV_BOOL:   return FB_BOOL;
 	case RV_FILE:   return FB_FILE;
@@ -779,7 +802,8 @@ fb_Kind fb_kind(fb_Value v) {
 	default:        return FB_OTHER;
 	}
 }
-long        fb_toint(fb_Value v)             { rval *r=(rval*)v; return r ? r->i : 0; }
+long        fb_toint(fb_Value v)             { rval *r=(rval*)v; if (!r) return 0; return r->k == RV_FLOAT ? (long)r->f : r->i; }
+double      fb_tofloat(fb_Value v)           { rval *r=(rval*)v; if (!r) return 0.0; return r->k == RV_FLOAT ? r->f : (double)r->i; }
 const char *fb_tostr(fb_State *S, fb_Value v){ (void)S; return as_cstr((rval*)v); }
 int         fb_len  (fb_Value v)             { rval *r=(rval*)v; return r ? (int)r->n : 0; }
 fb_Value    fb_at   (fb_Value v, int i) {
@@ -908,6 +932,7 @@ void *fb_object_data(fb_Value v) {
 int truthy(rval *v) {
 	if (!v || v->k == RV_NONE) return 0;
 	if (v->k == RV_BOOL || v->k == RV_INT) return v->i != 0;
+	if (v->k == RV_FLOAT) return v->f != 0.0;
 	return 1;
 }
 
@@ -1079,6 +1104,7 @@ static rval *build_command(ast *node, renv *e) {
 rval *eval(ast *n, renv *e) {
 	switch (n->kind) {
 	case AST_INT:    return rv_int(strtol(n->tok->string, NULL, 10));
+	case AST_FLOAT:  return rv_float(strtod(a_dupn(n->tok->string, n->tok->len), NULL));
 	case AST_BOOL:   return rv_bool(n->tok->len == 4);   /* "true" vs "false" */
 	case AST_STRTEXT: return rv_str(str_unescape(n->tok->string, n->tok->len));
 	case AST_STRING: {
@@ -1338,8 +1364,19 @@ rval *eval(ast *n, renv *e) {
 		rval *l = eval(n->kids[0], e);
 		rval *r = eval(n->kids[1], e);
 		int res;
-		if ((l->k == RV_INT || l->k == RV_BOOL) &&
-		    (r->k == RV_INT || r->k == RV_BOOL)) {
+		int lnum = l->k == RV_INT || l->k == RV_BOOL || l->k == RV_FLOAT;
+		int rnum = r->k == RV_INT || r->k == RV_BOOL || r->k == RV_FLOAT;
+		if (lnum && rnum && (l->k == RV_FLOAT || r->k == RV_FLOAT)) {
+			double a = as_dbl(l), b = as_dbl(r);
+			switch (n->tok->kind) {
+			case TOK_LT: res = a <  b; break;
+			case TOK_GT: res = a >  b; break;
+			case TOK_LE: res = a <= b; break;
+			case TOK_GE: res = a >= b; break;
+			case TOK_EQ: res = a == b; break;
+			default:     res = a != b; break;   /* TOK_NE */
+			}
+		} else if (lnum && rnum) {
 			long a = l->i, b = r->i;
 			switch (n->tok->kind) {
 			case TOK_LT: res = a <  b; break;
@@ -1363,9 +1400,20 @@ rval *eval(ast *n, renv *e) {
 		return rv_bool(res);
 	}
 
-	case AST_ARITH: {                    /* + - * / %, integer */
-		long a = eval(n->kids[0], e)->i;
-		long b = eval(n->kids[1], e)->i;
+	case AST_ARITH: {                    /* + - * / %, Int or Float */
+		rval *lv = eval(n->kids[0], e);
+		rval *rv = eval(n->kids[1], e);
+		if (lv->k == RV_FLOAT || rv->k == RV_FLOAT) {
+			double a = as_dbl(lv), b = as_dbl(rv);
+			switch (n->tok->kind) {
+			case TOK_PLUS:    return rv_float(a + b);
+			case TOK_MINUS:   return rv_float(a - b);
+			case TOK_STAR:    return rv_float(a * b);
+			case TOK_SLASH:   return rv_float(b != 0.0 ? a / b : 0.0);
+			default:          return rv_float(b != 0.0 ? fmod(a, b) : 0.0); /* TOK_PERCENT */
+			}
+		}
+		long a = lv->i, b = rv->i;
 		switch (n->tok->kind) {
 		case TOK_PLUS:    return rv_int(a + b);
 		case TOK_MINUS:   return rv_int(a - b);
@@ -1373,6 +1421,11 @@ rval *eval(ast *n, renv *e) {
 		case TOK_SLASH:   return rv_int(b ? a / b : 0);
 		default:          return rv_int(b ? a % b : 0);   /* TOK_PERCENT */
 		}
+	}
+
+	case AST_NEG: {                      /* unary "-", Int or Float */
+		rval *v = eval(n->kids[0], e);
+		return v->k == RV_FLOAT ? rv_float(-v->f) : rv_int(-v->i);
 	}
 
 	case AST_LOGICAL: {                  /* and / or / ||, short-circuit */

@@ -95,8 +95,12 @@ int main(int ac, char **av) {
 	fb_State *S = fb_new();          /* inits the arena; find_script uses a_dup */
 
 	/* --plugin PATH / --plugin=PATH : dlopen extensions before running, and
-	 * drop them from the args the script sees (compacted in place, no alloc). */
+	 * drop them from the args the script sees (compacted in place, no alloc).
+	 * --script PATH / --script=PATH : run PATH instead of the discovered
+	 * script (same arg-dropping treatment); FBUILD_SCRIPT env var is the
+	 * lower-precedence fallback for the same override. */
 	int fc = 1;
+	const char *script = NULL;
 	for (int i = 1; i < ac; i++) {
 		const char *path = NULL;
 		if (!strcmp(av[i], "--plugin")) {
@@ -104,15 +108,23 @@ int main(int ac, char **av) {
 			path = av[++i];
 		} else if (!strncmp(av[i], "--plugin=", 9)) {
 			path = av[i] + 9;
+		} else if (!strcmp(av[i], "--script")) {
+			if (i + 1 >= ac) die("--script needs a path");
+			script = av[++i];
+			continue;
+		} else if (!strncmp(av[i], "--script=", 9)) {
+			script = av[i] + 9;
+			continue;
 		} else {
 			av[fc++] = av[i];
 			continue;
 		}
 		if (fb_load_plugin(S, path)) die("%s", fb_error_msg(S));
 	}
+	if (!script) script = getenv("FBUILD_SCRIPT");
 
 	fb_set_args(S, fc, av);
-	int rc = fb_dofile(S, find_script());
+	int rc = fb_dofile(S, script ? script : find_script());
 	if (rc && fb_error_msg(S)[0])
 		fprintf(stderr, "error: %s\n", fb_error_msg(S));
 	fb_close(S);

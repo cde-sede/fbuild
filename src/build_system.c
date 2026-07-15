@@ -687,6 +687,7 @@ const char *ast_name[] = {
 	[AST_WHEN]="when",
 	[AST_COMPARE]="compare",
 	[AST_ARITH]="arith",
+	[AST_NEG]="neg",
 	[AST_LOGICAL]="logical",
 	[AST_NOT]="not",
 	[AST_MORPHISM]="morphism",
@@ -762,6 +763,7 @@ static ast *parse_expr_no_tuple(void);
 static ast *parse_command(void);
 static ast *parse_string(void);
 static ast *parse_postfix(void);
+static ast *parse_unary(void);
 static ast *parse_comparison(void);
 static ast *parse_guarded(void);
 static ast *parse_pipe(void);
@@ -1108,9 +1110,24 @@ static ast *parse_postfix(void) {
 	return base;
 }
 
-/* multiplicative: postfix *( ("*"|"/"|"%") postfix ), left-assoc */
+/* unary: "-" unary | postfix (binds tighter than * / %, looser than
+ * postfix; same leading-token trick as parse_not for "not") */
+static ast *parse_unary(void) {
+	if (sig_kind() == TOK_MINUS) {
+		skip_nl();
+		ast *n = node(AST_NEG);
+		n->tok = tok_cur();
+		tok_advance();
+		skip_nl();
+		push(n, parse_unary());
+		return n;
+	}
+	return parse_postfix();
+}
+
+/* multiplicative: unary *( ("*"|"/"|"%") unary ), left-assoc */
 static ast *parse_multiplicative(void) {
-	ast *left = parse_postfix();
+	ast *left = parse_unary();
 	for (tok_kind k = sig_kind();
 	     k == TOK_STAR || k == TOK_SLASH || k == TOK_PERCENT;
 	     k = sig_kind()) {
@@ -1120,7 +1137,7 @@ static ast *parse_multiplicative(void) {
 		tok_advance();
 		skip_nl();
 		push(n, left);
-		push(n, parse_postfix());
+		push(n, parse_unary());
 		left = n;
 	}
 	return left;

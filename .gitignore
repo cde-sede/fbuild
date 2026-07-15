@@ -16,13 +16,8 @@ cg.log
 midx
 
 
-# graphical example: build outputs + generated bindings
-graphical/build/
-graphical/gfx-auto
-graphical/gfx
-graphical/compile_commands.json
-graphical/raylib_gen.c
-graphical/*.png
+# graphical examples: not tracked
+graphical/
 
 # tree-sitter generated / built
 tree-sitter-funcbuild/funcbuild.so

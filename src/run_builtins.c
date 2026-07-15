@@ -267,41 +267,10 @@ static int file_copy(const char *src, const char *dst) {
 	return ok;
 }
 
-static rval *do_move(rval *a, rval *b) {       /* rename, fallback copy+unlink */
-	const char *s = pstr(a), *d = pstr(b);
-	if (rename(s, d) != 0 && file_copy(s, d)) unlink(s);
-	return rv_file(a_dup(d));
-}
 static rval *do_copy(rval *a, rval *b) {
 	const char *s = pstr(a), *d = pstr(b);
 	file_copy(s, d);
 	return rv_file(a_dup(d));
-}
-static rval *do_symlink(rval *target, rval *link) {
-	const char *t = pstr(target), *l = pstr(link);
-	unlink(l);                                 /* replace an existing link */
-	symlink(t, l);
-	return rv_file(a_dup(l));
-}
-static rval *do_remove(rval *f) {              /* unlink file, rmdir directory */
-	const char *p = pstr(f);
-	if (unlink(p) == 0) return rv_bool(1);
-	return rv_bool(rmdir(p) == 0);
-}
-static rval *do_touch(rval *f) {
-	const char *p = pstr(f);
-	int fd = open(p, O_WRONLY | O_CREAT, 0644);
-	if (fd >= 0) close(fd);
-	utimensat(AT_FDCWD, p, NULL, 0);           /* bump mtime to now */
-	return rv_file(a_dup(p));
-}
-static rval *do_is_dir(rval *f) {
-	struct stat st;
-	return rv_bool(stat(pstr(f), &st) == 0 && S_ISDIR(st.st_mode));
-}
-static rval *do_is_file(rval *f) {
-	struct stat st;
-	return rv_bool(stat(pstr(f), &st) == 0 && S_ISREG(st.st_mode));
 }
 
 /* lists ---------------------------------------------------------------- */
@@ -315,19 +284,6 @@ static rval *do_filter(rval *list, rval *fn) {
 	return out;
 }
 
-static rval *do_flatten(rval *list) {
-	rval *out = rv(RV_LIST);
-	if (!is_seq(list)) return out;
-	for (size_t i = 0; i < list->n; i++) {
-		rval *e = list->items[i];
-		if (is_seq(e))
-			for (size_t j = 0; j < e->n; j++) rv_push(out, e->items[j]);
-		else
-			rv_push(out, e);
-	}
-	return out;
-}
-
 static rval *do_concat(rval **args, size_t n) {
 	rval *out = rv(RV_LIST);
 	for (size_t i = 0; i < n; i++) {
@@ -338,18 +294,6 @@ static rval *do_concat(rval **args, size_t n) {
 			rv_push(out, a);
 	}
 	return out;
-}
-
-static rval *do_fold(rval *list, rval *init, rval *fn) {
-	rval *acc = init;
-	if (is_seq(list))
-		for (size_t i = 0; i < list->n; i++) {
-			rval *t = rv(RV_TUPLE);
-			rv_push(t, acc);
-			rv_push(t, list->items[i]);
-			acc = apply(fn, t);
-		}
-	return acc;
 }
 
 static rval *do_contains(rval *list, rval *x) {
@@ -372,137 +316,11 @@ static rval *do_last(rval *list) {
 
 /* take(list, n): first n elements. drop(list, n): all but the first n.
  * n is clamped to [0, len]; negative n counts from the end. */
-static rval *do_take(rval *list, rval *count) {
-	rval *out = rv(RV_LIST);
-	if (!is_seq(list)) return out;
-	long c = count->k == RV_INT ? count->i : 0;
-	if (c < 0) c += (long)list->n;
-	if (c < 0) c = 0;
-	if (c > (long)list->n) c = (long)list->n;
-	for (long i = 0; i < c; i++) rv_push(out, list->items[i]);
-	return out;
-}
-static rval *do_drop(rval *list, rval *count) {
-	rval *out = rv(RV_LIST);
-	if (!is_seq(list)) return out;
-	long c = count->k == RV_INT ? count->i : 0;
-	if (c < 0) c += (long)list->n;
-	if (c < 0) c = 0;
-	if (c > (long)list->n) c = (long)list->n;
-	for (long i = c; i < (long)list->n; i++) rv_push(out, list->items[i]);
-	return out;
-}
-
-static int cmp_rv(const void *a, const void *b) {
-	return strcmp(as_cstr(*(rval *const *)a), as_cstr(*(rval *const *)b));
-}
-static rval *do_sort(rval *list) {
-	rval *out = rv(RV_LIST);
-	if (!is_seq(list)) return out;
-	for (size_t i = 0; i < list->n; i++) rv_push(out, list->items[i]);
-	if (out->n) qsort(out->items, out->n, sizeof *out->items, cmp_rv);
-	return out;
-}
-static rval *do_unique(rval *list) {
-	rval *out = rv(RV_LIST);
-	if (!is_seq(list)) return out;
-	for (size_t i = 0; i < list->n; i++) {
-		const char *s = as_cstr(list->items[i]);
-		int seen = 0;
-		for (size_t j = 0; j < out->n; j++)
-			if (strcmp(as_cstr(out->items[j]), s) == 0) { seen = 1; break; }
-		if (!seen) rv_push(out, list->items[i]);
-	}
-	return out;
-}
 
 /* python-style list ops -------------------------------------------------- */
 
-static rval *do_range(long start, long stop) {       /* [start, stop) */
-	rval *l = rv(RV_LIST);
-	for (long i = start; i < stop; i++) rv_push(l, rv_int(i));
-	return l;
-}
-static rval *do_enumerate(rval *list) {              /* [(0,x0), (1,x1), ...] */
-	rval *l = rv(RV_LIST);
-	if (!is_seq(list)) return l;
-	for (size_t i = 0; i < list->n; i++) {
-		rval *t = rv(RV_TUPLE);
-		rv_push(t, rv_int((long)i));
-		rv_push(t, list->items[i]);
-		rv_push(l, t);
-	}
-	return l;
-}
-static rval *do_slice(rval *list, long s, long e) {  /* list[s:e], neg from end */
-	rval *l = rv(RV_LIST);
-	if (!is_seq(list)) return l;
-	long n = (long)list->n;
-	if (s < 0) s += n;
-	if (e < 0) e += n;
-	if (s < 0) s = 0;
-	if (e > n) e = n;
-	for (long i = s; i < e; i++) rv_push(l, list->items[i]);
-	return l;
-}
 /* first index where (key ? key(elem) : elem) equals val, or -1. */
-static rval *do_index(rval *list, rval *val, rval *key) {
-	if (!is_seq(list)) return rv_int(-1);
-	const char *s = as_cstr(val);
-	int scr = key && g_scratch && arena_current() != g_scratch;
-	for (size_t i = 0; i < list->n; i++) {
-		/* key result is consumed immediately (compared), never kept: evaluate
-		 * it in scratch and drop it -- no promotion needed. */
-		void  *durable = arena_current();
-		size_t mark    = scr ? arena_pos(g_scratch) : 0;
-		if (scr) arena_use(g_scratch);
-		rval *e = key ? apply(key, list->items[i]) : list->items[i];
-		int match = !strcmp(as_cstr(e), s);
-		if (scr) { arena_use(durable); arena_reset_to(g_scratch, mark); }
-		if (match) return rv_int((long)i);
-	}
-	return rv_int(-1);
-}
-static rval *do_reverse(rval *list) {
-	rval *l = rv(RV_LIST);
-	if (!is_seq(list)) return l;
-	for (size_t i = list->n; i > 0; i--) rv_push(l, list->items[i - 1]);
-	return l;
-}
 /* sum/min/max accept either a single sequence or varargs: sum(L) == sum(1,2,3). */
-static void agg_items(rval **args, size_t n, rval ***it, size_t *cnt) {
-	if (n == 1 && is_seq(args[0])) { *it = args[0]->items; *cnt = args[0]->n; }
-	else                           { *it = args;           *cnt = n; }
-}
-static rval *do_sum(rval **args, size_t n) {
-	rval **it; size_t c; agg_items(args, n, &it, &c);
-	long t = 0;
-	for (size_t i = 0; i < c; i++) t += it[i]->i;
-	return rv_int(t);
-}
-static rval *do_min(rval **args, size_t n) {
-	rval **it; size_t c; agg_items(args, n, &it, &c);
-	if (!c) return rv_int(0);
-	long m = it[0]->i;
-	for (size_t i = 1; i < c; i++) if (it[i]->i < m) m = it[i]->i;
-	return rv_int(m);
-}
-static rval *do_max(rval **args, size_t n) {
-	rval **it; size_t c; agg_items(args, n, &it, &c);
-	if (!c) return rv_int(0);
-	long m = it[0]->i;
-	for (size_t i = 1; i < c; i++) if (it[i]->i > m) m = it[i]->i;
-	return rv_int(m);
-}
-static rval *do_count(rval *list, rval *val) {       /* occurrences of val */
-	long c = 0;
-	if (is_seq(list)) {
-		const char *s = as_cstr(val);
-		for (size_t i = 0; i < list->n; i++)
-			if (!strcmp(as_cstr(list->items[i]), s)) c++;
-	}
-	return rv_int(c);
-}
 
 /* strings -------------------------------------------------------------- */
 
@@ -528,21 +346,6 @@ static rval *do_split(const char *s, const char *sep) {
 	while ((q = strstr(p, sep))) { rv_push(out, rv_str(a_dupn(p, q - p))); p = q + sl; }
 	rv_push(out, rv_str(a_dup(p)));
 	return out;
-}
-
-static rval *do_replace(const char *s, const char *a, const char *b) {
-	if (!*a) return rv_str(a_dup(s));
-	size_t la = strlen(a), lb = strlen(b), cnt = 0;
-	for (const char *p = s; (p = strstr(p, a)); p += la) cnt++;
-	char *out = a_alloc(strlen(s) + (lb > la ? cnt * (lb - la) : 0) + 1), *w = out;
-	const char *p = s, *q;
-	while ((q = strstr(p, a))) {
-		memcpy(w, p, q - p); w += q - p;
-		memcpy(w, b, lb);    w += lb;
-		p = q + la;
-	}
-	strcpy(w, p);
-	return rv_str(out);
 }
 
 /* paths ---------------------------------------------------------------- */
@@ -573,25 +376,12 @@ static rval *do_with_name(rval *f, const char *nm) {
 
 /* more string ops --------------------------------------------------------- */
 
-static rval *do_find(const char *s, const char *sub) {   /* byte index or -1 */
-	const char *p = strstr(s, sub);
-	return rv_int(p ? (long)(p - s) : -1);
+static rval *do_to_int(rval *v) {
+	if (v->k == RV_FLOAT) return rv_int((long)v->f);
+	return rv_int(strtol(as_cstr(v), NULL, 10));
 }
-static rval *do_to_int(rval *v) { return rv_int(strtol(as_cstr(v), NULL, 10)); }
+static rval *do_to_float(rval *v) { return rv_float(strtod(as_cstr(v), NULL)); }
 static rval *do_to_str(rval *v) { return rv_str(a_dup(as_cstr(v))); }
-static rval *do_repeat(const char *s, long n) {
-	if (n < 0) n = 0;
-	size_t l = strlen(s);
-	char *b = a_alloc(l * (size_t)n + 1);
-	for (long i = 0; i < n; i++) memcpy(b + (size_t)i * l, s, l);
-	b[l * (size_t)n] = '\0';
-	return rv_str(b);
-}
-static rval *do_chars(const char *s) {          /* string -> list of 1-char strings */
-	rval *l = rv(RV_LIST);
-	for (; *s; s++) { char *c = a_alloc(2); c[0] = *s; c[1] = '\0'; rv_push(l, rv_str(c)); }
-	return l;
-}
 
 static rval *do_cat(rval **a, size_t n) {       /* concat strings */
 	size_t tot = 1;
@@ -601,85 +391,7 @@ static rval *do_cat(rval **a, size_t n) {       /* concat strings */
 	for (size_t i = 0; i < n; i++) strcat(b, as_cstr(a[i]));
 	return rv_str(b);
 }
-static rval *do_upper(rval *v) {
-	char *s = a_dup(as_cstr(v));
-	for (char *p = s; *p; p++) *p = (char)toupper((unsigned char)*p);
-	return rv_str(s);
-}
-static rval *do_lower(rval *v) {
-	char *s = a_dup(as_cstr(v));
-	for (char *p = s; *p; p++) *p = (char)tolower((unsigned char)*p);
-	return rv_str(s);
-}
-static rval *do_trim(rval *v) {
-	const char *s = as_cstr(v);
-	while (isspace((unsigned char)*s)) s++;
-	size_t l = strlen(s);
-	while (l && isspace((unsigned char)s[l - 1])) l--;
-	return rv_str(a_dupn(s, l));
-}
-static rval *do_starts_with(rval *v, rval *p) {
-	const char *s = as_cstr(v), *pre = as_cstr(p);
-	return rv_bool(strncmp(s, pre, strlen(pre)) == 0);
-}
-static rval *do_ends_with(rval *v, rval *p) {
-	const char *s = as_cstr(v), *suf = as_cstr(p);
-	size_t ls = strlen(s), lf = strlen(suf);
-	return rv_bool(lf <= ls && strcmp(s + ls - lf, suf) == 0);
-}
-static rval *do_capitalize(rval *v) {           /* first upper, rest lower */
-	char *s = a_dup(as_cstr(v));
-	if (s[0]) {
-		s[0] = (char)toupper((unsigned char)s[0]);
-		for (char *p = s + 1; *p; p++) *p = (char)tolower((unsigned char)*p);
-	}
-	return rv_str(s);
-}
-static rval *do_title(rval *v) {                 /* capitalize each word */
-	char *s = a_dup(as_cstr(v));
-	int start = 1;
-	for (char *p = s; *p; p++) {
-		if (isspace((unsigned char)*p)) { start = 1; continue; }
-		*p = start ? (char)toupper((unsigned char)*p) : (char)tolower((unsigned char)*p);
-		start = 0;
-	}
-	return rv_str(s);
-}
-static rval *do_lstrip(rval *v) {
-	const char *s = as_cstr(v);
-	while (isspace((unsigned char)*s)) s++;
-	return rv_str(a_dup(s));
-}
-static rval *do_rstrip(rval *v) {
-	const char *s = as_cstr(v);
-	size_t l = strlen(s);
-	while (l && isspace((unsigned char)s[l - 1])) l--;
-	return rv_str(a_dupn(s, l));
-}
-static rval *do_strip_prefix(rval *v, rval *p) {
-	const char *s = as_cstr(v), *pre = as_cstr(p);
-	size_t lp = strlen(pre);
-	return rv_str(a_dup(strncmp(s, pre, lp) == 0 ? s + lp : s));
-}
-static rval *do_strip_suffix(rval *v, rval *p) {
-	const char *s = as_cstr(v), *suf = as_cstr(p);
-	size_t ls = strlen(s), lf = strlen(suf);
-	if (lf <= ls && strcmp(s + ls - lf, suf) == 0) return rv_str(a_dupn(s, ls - lf));
-	return rv_str(a_dup(s));
-}
 /* pad s to width with fill; side: -1 pad left, +1 pad right, 0 center */
-static rval *pad_to(const char *s, long width, char fill, int side) {
-	size_t l = strlen(s);
-	if (width < 0 || (size_t)width <= l) return rv_str(a_dupn(s, l));
-	size_t total = (size_t)width, padn = total - l;
-	size_t lpad = side < 0 ? padn : side > 0 ? 0 : padn / 2;
-	char *b = a_alloc(total + 1);
-	memset(b, fill, lpad);
-	memcpy(b + lpad, s, l);
-	memset(b + lpad + l, fill, total - lpad - l);
-	b[total] = '\0';
-	return rv_str(b);
-}
 
 /* more path ops ----------------------------------------------------------- */
 
@@ -737,6 +449,7 @@ static void repr(sbuf *s, rval *v) {
 	switch (v->k) {
 	case RV_NONE:  sb_puts(s, "()");                       break;
 	case RV_INT:   sb_putl(s, v->i);                       break;
+	case RV_FLOAT: sb_puts(s, fmt_double(v->f));           break;
 	case RV_BOOL:  sb_puts(s, v->i ? "true" : "false");    break;
 	case RV_STR:   sb_puts(s, v->s ? v->s : "");           break;
 	case RV_FILE:  sb_puts(s, v->s ? v->s : "");           break;
@@ -799,6 +512,7 @@ static void debug_repr(sbuf *s, rval *v) {
 	switch (v->k) {
 	case RV_NONE:  sb_puts(s, "None");                          break;
 	case RV_INT:   sb_puts(s, "Int(");  sb_putl(s, v->i); sb_putc(s, ')'); break;
+	case RV_FLOAT: sb_puts(s, "Float("); sb_puts(s, fmt_double(v->f)); sb_putc(s, ')'); break;
 	case RV_BOOL:  sb_puts(s, v->i ? "Bool(true)" : "Bool(false)"); break;
 	case RV_STR:   sb_puts(s, "Str(\""); sb_puts(s, v->s ? v->s : ""); sb_puts(s, "\")"); break;
 	case RV_FILE:  sb_puts(s, "File("); sb_puts(s, v->s ? v->s : ""); sb_putc(s, ')'); break;
@@ -869,11 +583,11 @@ static rval *do_print(rval **a, size_t n, int dbg) {
 
 /* ---- JSON ------------------------------------------------------------- */
 /* Values map: object -> RV_MAP, array -> RV_LIST, string -> RV_STR,
- * integer -> RV_INT, real -> RV_STR flagged numeric (i==1, no float type),
+ * integer -> RV_INT, real -> RV_FLOAT,
  * true/false -> RV_BOOL, null -> (). All arena-allocated. */
 
 static rval *json_num(char *text, int isreal) {
-	if (isreal) { rval *v = rv_str(text); v->i = 1; return v; }  /* i=1: numeric */
+	if (isreal) return rv_float(strtod(text, NULL));
 	return rv_int(strtol(text, NULL, 10));
 }
 
@@ -1022,11 +736,9 @@ static void json_emit(sbuf *s, rval *v, int pretty, int depth) {
 	switch (v->k) {
 	case RV_NONE:  sb_puts(s, "null");                       break;
 	case RV_INT:   sb_putl(s, v->i);                         break;
+	case RV_FLOAT: sb_puts(s, fmt_double(v->f));             break;
 	case RV_BOOL:  sb_puts(s, v->i ? "true" : "false");      break;
-	case RV_STR:
-		if (v->i) sb_puts(s, v->s ? v->s : "0");      /* numeric (i==1) */
-		else      json_emit_str(s, v->s ? v->s : "");
-		break;
+	case RV_STR:   json_emit_str(s, v->s ? v->s : "");       break;
 	case RV_FILE:  json_emit_str(s, v->s ? v->s : "");       break;
 	case RV_LIST:
 	case RV_TUPLE:
@@ -1098,17 +810,21 @@ static rval *do_has(rval *m, rval *key) {
 int is_builtin(const char *s) {
 	static const char *names[] = {
 		"glob","zip","subst","stale","run","env","shell","which","exists",
-		"mkdir","read","write","move","copy","symlink","remove","touch",
-		"is_dir","is_file","filter","contains","flatten","concat","fold","length",
-		"first","last","take","drop","sort","unique","join","split","replace",
-		"cat","upper","lower","trim","starts_with","ends_with",
+		"mkdir","read","write","copy",
+		"filter","contains","concat","length",
+		"first","last","join","split",
+		"cat",
 		"parent","name","stem","suffix","with_suffix","with_name","path","abs",
 		"print","debug",
 		"json_parse","json_read","json_str","json_pretty","json_write",
 		"get","has","keys","values","items",
-		"range","enumerate","slice","index","reverse","sum","min","max","count",
-		"find","to_int","to_str","repeat","chars",
+		"to_int","to_str","to_float",
 		"flag","opt","positionals", NULL };
+	/* moved to plugins (fbfs/fbloop/fbstr): move symlink remove touch is_dir
+	 * is_file flatten fold take drop sort unique replace upper lower trim
+	 * starts_with ends_with capitalize title lstrip rstrip strip_prefix
+	 * strip_suffix pad_* center range enumerate slice index reverse sum min max
+	 * count find repeat chars -- resolved via fb_reg_find when loaded. */
 	for (size_t i = 0; names[i]; i++) if (!strcmp(s, names[i])) return 1;
 	return fb_reg_find(s) != NULL;   /* registered host/plugin builtin */
 }
@@ -1280,43 +996,24 @@ static rval *do_shell(rval *v) {
 WC1(w_glob, do_glob)          WVN(w_zip, do_zip)          WVN(w_stale, do_stale)
 WC1(w_env, do_env)            WV1(w_shell, do_shell)      WC1(w_which, do_which)
 WV1(w_exists, do_exists)      WV1(w_mkdir, do_mkdir)      WV1(w_read, do_read)
-WV2(w_write, do_write)        WV2(w_move, do_move)        WV2(w_copy, do_copy)
-WV2(w_symlink, do_symlink)    WV1(w_remove, do_remove)    WV1(w_touch, do_touch)
-WV1(w_is_dir, do_is_dir)      WV1(w_is_file, do_is_file)
-WV2(w_filter, do_filter)      WV2(w_contains, do_contains)WV1(w_flatten, do_flatten)
-WV1(w_length, do_length)      WV1(w_first, do_first)      WV1(w_last, do_last)
-WV2(w_take, do_take)          WV2(w_drop, do_drop)        WV1(w_sort, do_sort)
-WV1(w_unique, do_unique)      WV1(w_enumerate, do_enumerate) WV1(w_reverse, do_reverse)
-WV2(w_count, do_count)        WVN(w_concat, do_concat)    WVN(w_cat, do_cat)
-WC2(w_split, do_split)        WV1(w_upper, do_upper)      WV1(w_lower, do_lower)
-WV1(w_trim, do_trim)          WV1(w_capitalize, do_capitalize) WV1(w_title, do_title)
-WV1(w_lstrip, do_lstrip)      WV1(w_rstrip, do_rstrip)
-WV2(w_strip_prefix, do_strip_prefix) WV2(w_strip_suffix, do_strip_suffix)
-WV2(w_starts_with, do_starts_with)   WV2(w_ends_with, do_ends_with)
-WC2(w_find, do_find)          WV1(w_to_int, do_to_int)    WV1(w_to_str, do_to_str)
-WC1(w_chars, do_chars)        WV1(w_abs, do_abs)          WVN(w_path, do_path)
+WV2(w_write, do_write)        WV2(w_copy, do_copy)
+WV2(w_filter, do_filter)      WV2(w_contains, do_contains)WV1(w_length, do_length)      WV1(w_first, do_first)      WV1(w_last, do_last)
+WVN(w_concat, do_concat)    WVN(w_cat, do_cat)
+WC2(w_split, do_split)        WV1(w_to_int, do_to_int)    WV1(w_to_str, do_to_str)
+WV1(w_to_float, do_to_float)
+WV1(w_abs, do_abs)          WVN(w_path, do_path)
 WV2(w_has, do_has)            WV1(w_keys, do_keys)        WV1(w_values, do_values)
 WV1(w_items, do_items)        WV1(w_sleep, do_sleep)      WV1(w_config, do_config)
-WV2(w_opt, do_opt)            WVN(w_sum, do_sum)          WVN(w_min, do_min)
-WVN(w_max, do_max)
-
-/* wrappers with argument reshaping / mixed types */
+WV2(w_opt, do_opt)            /* wrappers with argument reshaping / mixed types */
 static fb_Value w_subst(fb_State*S,fb_Value*a,int n){(void)S;(void)n;
 	return RV(rv_str(subst_a(AC(1), AC(2), AC(0)))); }        /* subst(s,from,to) */
 static fb_Value w_join(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_join(AR(0), AC(1)));}
-static fb_Value w_replace(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_replace(AC(0),AC(1),AC(2)));}
-static fb_Value w_repeat(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_repeat(AC(0), AI(1)));}
 static fb_Value w_with_suffix(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_with_suffix(AR(0), AC(1)));}
 static fb_Value w_with_name(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_with_name(AR(0), AC(1)));}
 static fb_Value w_parent(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(rv_str(path_dir(pstr(AR(0)))));}
 static fb_Value w_name(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(rv_str(path_base(pstr(AR(0)))));}
 static fb_Value w_stem(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(rv_str(path_stem(pstr(AR(0)))));}
 static fb_Value w_suffix(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(rv_str(path_suffix(pstr(AR(0)))));}
-static fb_Value w_fold(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_fold(AR(0),AR(1),AR(2)));}
-static fb_Value w_range(fb_State*S,fb_Value*a,int n){(void)S;
-	return RV(n == 1 ? do_range(0, AI(0)) : do_range(AI(0), AI(1))); }
-static fb_Value w_slice(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_slice(AR(0), AI(1), AI(2)));}
-static fb_Value w_index(fb_State*S,fb_Value*a,int n){(void)S;return RV(do_index(AR(0), AR(1), n >= 3 ? AR(2) : NULL));}
 static fb_Value w_get(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(map_get(AR(0), AC(1)));}
 static fb_Value w_clock(fb_State*S,fb_Value*a,int n){(void)S;(void)a;(void)n;return RV(do_clock());}
 static fb_Value w_time(fb_State*S,fb_Value*a,int n){(void)S;(void)a;(void)n;return RV(do_time());}
@@ -1330,13 +1027,6 @@ static fb_Value w_print(fb_State*S,fb_Value*a,int n){(void)S;return RV(do_print(
 static fb_Value w_debug(fb_State*S,fb_Value*a,int n){(void)S;return RV(do_print((rval**)a,(size_t)n,1));}
 static fb_Value w_flag(fb_State*S,fb_Value*a,int n){(void)S;return RV(do_flag((rval**)a,(size_t)n));}
 static fb_Value l_pkgconfig(fb_State*S,fb_Value*a,int n){(void)S;(void)n;return RV(do_pkgconfig(AC(0)));}
-static fb_Value w_pad(fb_State*S,fb_Value*a,int n,int side){(void)S;
-	char fill = ' ';
-	if (n >= 3) { const char *f = AC(2); if (f[0]) fill = f[0]; }
-	return RV(pad_to(AC(0), AI(1), fill, side)); }
-static fb_Value w_pad_left (fb_State*S,fb_Value*a,int n){return w_pad(S,a,n,-1);}
-static fb_Value w_pad_right(fb_State*S,fb_Value*a,int n){return w_pad(S,a,n, 1);}
-static fb_Value w_center   (fb_State*S,fb_Value*a,int n){return w_pad(S,a,n, 0);}
 /* bench(label, expr): FB_LAZY -- times evaluation of the (unevaluated) expr
  * between two clock reads, prints elapsed when --bench is set, returns expr's
  * value so it stays transparent in a pipeline. The reference lazy builtin. */
@@ -1376,39 +1066,22 @@ void fb_open_base(fb_State *S) {
 		/* time */
 		{"clock",w_clock,0,0,FB_RET_INT,0}, {"time",w_time,0,0,FB_RET_INT,0},
 		{"sleep",w_sleep,1,1,FB_RET_UNIT,0}, {"bench",w_bench,2,2,FB_RET_ANY,FB_LAZY},
-		/* filesystem */
+		/* filesystem (move/symlink/remove/touch/is_dir/is_file -> fbfs plugin) */
 		{"glob",w_glob,1,1,FB_RET_LIST,0}, {"exists",w_exists,1,1,FB_RET_BOOL,0},
 		{"mkdir",w_mkdir,1,1,FB_RET_FILE,0}, {"read",w_read,1,1,FB_RET_STR,0},
-		{"write",w_write,2,2,FB_RET_FILE,0}, {"move",w_move,2,2,FB_RET_FILE,0},
-		{"copy",w_copy,2,2,FB_RET_FILE,0}, {"symlink",w_symlink,2,2,FB_RET_FILE,0},
-		{"remove",w_remove,1,1,FB_RET_BOOL,0}, {"touch",w_touch,1,1,FB_RET_FILE,0},
-		{"is_dir",w_is_dir,1,1,FB_RET_BOOL,0}, {"is_file",w_is_file,1,1,FB_RET_BOOL,0},
+		{"write",w_write,2,2,FB_RET_FILE,0}, {"copy",w_copy,2,2,FB_RET_FILE,0},
 		{"stale",w_stale,1,-1,FB_RET_BOOL,0},
-		/* list */
+		/* list glue (iteration/transform ops -> fbloop plugin) */
 		{"zip",w_zip,2,-1,FB_RET_LIST,0}, {"filter",w_filter,2,2,FB_RET_LIST,0},
-		{"contains",w_contains,2,2,FB_RET_BOOL,0}, {"flatten",w_flatten,1,1,FB_RET_LIST,0},
-		{"concat",w_concat,0,-1,FB_RET_LIST,0}, {"fold",w_fold,3,3,FB_RET_ANY,0},
+		{"contains",w_contains,2,2,FB_RET_BOOL,0},
+		{"concat",w_concat,0,-1,FB_RET_LIST,0},
 		{"length",w_length,1,1,FB_RET_INT,0}, {"first",w_first,1,1,FB_RET_ANY,0},
-		{"last",w_last,1,1,FB_RET_ANY,0}, {"take",w_take,2,2,FB_RET_LIST,0},
-		{"drop",w_drop,2,2,FB_RET_LIST,0}, {"sort",w_sort,1,1,FB_RET_LIST,0},
-		{"unique",w_unique,1,1,FB_RET_LIST,0}, {"range",w_range,1,2,FB_RET_LIST,0},
-		{"enumerate",w_enumerate,1,1,FB_RET_LIST,0}, {"slice",w_slice,3,3,FB_RET_LIST,0},
-		{"index",w_index,2,3,FB_RET_INT,0}, {"reverse",w_reverse,1,1,FB_RET_LIST,0},
-		{"sum",w_sum,1,-1,FB_RET_INT,0}, {"min",w_min,1,-1,FB_RET_INT,0},
-		{"max",w_max,1,-1,FB_RET_INT,0}, {"count",w_count,2,2,FB_RET_INT,0},
-		/* string */
+		{"last",w_last,1,1,FB_RET_ANY,0},
+		/* string glue (text utilities -> fbstr plugin) */
 		{"cat",w_cat,0,-1,FB_RET_STR,0}, {"join",w_join,2,2,FB_RET_STR,0},
-		{"split",w_split,2,2,FB_RET_LIST,0}, {"replace",w_replace,3,3,FB_RET_STR,0},
-		{"subst",w_subst,3,3,FB_RET_STR,0}, {"upper",w_upper,1,1,FB_RET_STR,0},
-		{"lower",w_lower,1,1,FB_RET_STR,0}, {"trim",w_trim,1,1,FB_RET_STR,0},
-		{"capitalize",w_capitalize,1,1,FB_RET_STR,0}, {"title",w_title,1,1,FB_RET_STR,0},
-		{"lstrip",w_lstrip,1,1,FB_RET_STR,0}, {"rstrip",w_rstrip,1,1,FB_RET_STR,0},
-		{"strip_prefix",w_strip_prefix,2,2,FB_RET_STR,0}, {"strip_suffix",w_strip_suffix,2,2,FB_RET_STR,0},
-		{"pad_left",w_pad_left,2,3,FB_RET_STR,0}, {"pad_right",w_pad_right,2,3,FB_RET_STR,0},
-		{"center",w_center,2,3,FB_RET_STR,0}, {"starts_with",w_starts_with,2,2,FB_RET_BOOL,0},
-		{"ends_with",w_ends_with,2,2,FB_RET_BOOL,0}, {"find",w_find,2,2,FB_RET_INT,0},
-		{"repeat",w_repeat,2,2,FB_RET_STR,0}, {"chars",w_chars,1,1,FB_RET_LIST,0},
+		{"split",w_split,2,2,FB_RET_LIST,0}, {"subst",w_subst,3,3,FB_RET_STR,0},
 		{"to_int",w_to_int,1,1,FB_RET_INT,0}, {"to_str",w_to_str,1,1,FB_RET_STR,0},
+		{"to_float",w_to_float,1,1,FB_RET_FLOAT,0},
 		/* path */
 		{"parent",w_parent,1,1,FB_RET_STR,0}, {"name",w_name,1,1,FB_RET_STR,0},
 		{"stem",w_stem,1,1,FB_RET_STR,0}, {"suffix",w_suffix,1,1,FB_RET_STR,0},

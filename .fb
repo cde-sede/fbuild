@@ -31,7 +31,7 @@ log    = l, m -> print(cat('[', l, '] ', m))
 
 compile = o, s -> `{CC} {...CFLAGS} -c {...s} -o {.o}`
                   when stale(.o, ...s, ...HDRS) or FORCE
-link    = a, d -> `{CC} {...d} -o {.a} -rdynamic -ldl` when stale(.a, ...d) or FORCE
+link    = a, d -> `{CC} {...d} -o {.a} -rdynamic -ldl -lm` when stale(.a, ...d) or FORCE
 create_cmd = (f, artifact, @deps -> f(.artifact, ...deps))
 
 entry = o, s -> {

@@ -25,6 +25,7 @@ typedef enum {
 	AST_WHEN,       /* kids[0] = condition                         */
 	AST_COMPARE,    /* tok = op token, kids[0]=left, [1]=right     */
 	AST_ARITH,      /* tok = +|-|*|/|%, kids[0]=left, [1]=right    */
+	AST_NEG,        /* tok = '-', kids[0]=operand; unary negation  */
 	AST_LOGICAL,    /* tok = "and"/"or", kids[0]=left, [1]=right   */
 	AST_NOT,        /* tok = "not", kids[0]=operand               */
 	AST_MORPHISM,   /* tok = "//", kids[0]=left, [1]=right         */

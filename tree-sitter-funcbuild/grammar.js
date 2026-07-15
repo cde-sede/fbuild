@@ -39,6 +39,10 @@ export default grammar({
     [$._comparison, $.comparison_expression],
     [$._additive, $.arith_expression],
     [$._multiplicative, $.arith_expression_mul],
+    // `LVALUE <- expr`: the target is a bare _postfix, but _postfix also
+    // reduces upward through every arithmetic/comparison tier, so the parser
+    // needs to keep both alive until it sees whether `<-` follows.
+    [$.store_expression, $._unary],
   ],
 
   word: $ => $.identifier,
@@ -84,6 +88,7 @@ export default grammar({
     expression: $ => choice(
       $.assignment,
       $.eager_assignment,
+      $.store_expression,
       $._tuple,
     ),
 
@@ -97,6 +102,14 @@ export default grammar({
     eager_assignment: $ => seq(
       field("name", $.identifier),
       "~=",
+      field("value", $.expression),
+    ),
+
+    // `LVALUE <- expr`: mutable store. `<-` lexed before `<` (maximal munch),
+    // so `a<-b` is a store, not `a < -b`.
+    store_expression: $ => seq(
+      field("target", $._postfix),
+      "<-",
       field("value", $.expression),
     ),
 
@@ -180,15 +193,27 @@ export default grammar({
     // Arithmetic, tighter than comparison
     //
     _additive: $ => choice($.arith_expression, $._multiplicative),
-    _multiplicative: $ => choice($.arith_expression_mul, $._postfix),
+    _multiplicative: $ => choice($.arith_expression_mul, $._unary),
     arith_expression: $ => prec.left(seq(
       $._multiplicative,
       repeat1(seq(choice("+", "-"), $._multiplicative)),
     )),
     arith_expression_mul: $ => prec.left(seq(
-      $._postfix,
-      repeat1(seq(choice("*", "/", "%"), $._postfix)),
+      $._unary,
+      repeat1(seq(choice("*", "/", "%"), $._unary)),
     )),
+
+    //
+    // Unary minus, tighter than * / %, looser than postfix
+    //
+    // Caveat (same pre-existing "statements aren't newline-terminated"
+    // looseness noted elsewhere in this grammar): `-` can now also START a
+    // statement, so GLR sometimes resolves a trailing binary `a - b` as `a`
+    // followed by a new `- b` statement instead of continuing the same
+    // arith_expression. The hand-written interpreter parser (build_system.c)
+    // has no such ambiguity; this only affects editor tooling.
+    _unary: $ => choice($.neg_expression, $._postfix),
+    neg_expression: $ => prec.right(seq("-", $._unary)),
 
     //
     // Postfix and atoms

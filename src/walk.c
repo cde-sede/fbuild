@@ -30,6 +30,7 @@ char *AST_NODE_NAMES[] = {
 	[AST_WHEN] = "AST_WHEN",
 	[AST_COMPARE] = "AST_COMPARE",
 	[AST_ARITH] = "AST_ARITH",
+	[AST_NEG] = "AST_NEG",
 	[AST_LOGICAL] = "AST_LOGICAL",
 	[AST_NOT] = "AST_NOT",
 	[AST_MORPHISM] = "AST_MORPHISM",
@@ -131,6 +132,7 @@ static obj_type *t_file(void) {
 static obj_type *fb_ret_type(fb_Ret r) {
 	switch (r) {
 	case FB_RET_INT:  return t_new(RET_INT);
+	case FB_RET_FLOAT: return t_new(RET_FLOAT);
 	case FB_RET_STR:  return t_new(RET_STRING);
 	case FB_RET_BOOL: return t_new(RET_BOOL);
 	case FB_RET_FILE: return t_file();
@@ -165,6 +167,9 @@ static int unify(obj_type *a, obj_type *b) {
 		return 1;
 	if (a->ret == RET_VAR || b->ret == RET_VAR)
 		return 1;
+	if ((a->ret == RET_INT || a->ret == RET_FLOAT) &&
+	    (b->ret == RET_INT || b->ret == RET_FLOAT))
+		return 1;                    /* Int/Float are mutually numeric */
 	if (a->ret != b->ret)
 		return 0;
 	if (a->nchildren != b->nchildren)
@@ -313,7 +318,7 @@ static int is_builtin_name(token *t) {
 		"json_parse", "json_read", "json_str", "json_pretty", "json_write",
 		"get", "has", "keys", "values", "items",
 		"range", "enumerate", "slice", "index", "reverse", "sum", "min", "max",
-		"count", "find", "to_int", "to_str", "repeat", "chars",
+		"count", "find", "to_int", "to_str", "to_float", "repeat", "chars",
 		"clock", "time", "sleep", "bench", "config",
 		"flag", "opt", "positionals",
 		NULL,
@@ -384,7 +389,7 @@ static obj_type *infer_call(ast *node, scope *sc) {
 			{"keys",1,1}, {"values",1,1}, {"items",1,1},
 			{"range",1,2}, {"enumerate",1,1}, {"slice",3,3}, {"index",2,3},
 			{"reverse",1,1}, {"sum",1,-1}, {"min",1,-1}, {"max",1,-1},
-			{"count",2,2}, {"find",2,2}, {"to_int",1,1}, {"to_str",1,1},
+			{"count",2,2}, {"find",2,2}, {"to_int",1,1}, {"to_str",1,1}, {"to_float",1,1},
 			{"repeat",2,2}, {"chars",1,1},
 			{"clock",0,0}, {"time",0,0}, {"sleep",1,1}, {"bench",2,2},
 			{"config",1,1}, {"flag",1,-1}, {"opt",2,2}, {"positionals",0,0},
@@ -471,6 +476,7 @@ static obj_type *infer_call(ast *node, scope *sc) {
 		 || tok_is(callee->tok, "count") || tok_is(callee->tok, "find")
 		 || tok_is(callee->tok, "to_int"))
 			return t_new(RET_INT);
+		if (tok_is(callee->tok, "to_float")) return t_new(RET_FLOAT);
 		if (tok_is(callee->tok, "to_str") || tok_is(callee->tok, "repeat"))
 			return t_new(RET_STRING);
 		if (tok_is(callee->tok, "chars")) return t_list(t_new(RET_STRING));
@@ -694,16 +700,25 @@ static obj_type *infer(ast *node, scope *sc) {
 		break;
 	}
 
-	case AST_ARITH: {                    /* + - * / % : Int x Int -> Int */
+	case AST_ARITH: {     /* + - * / % : (Int|Float) x (Int|Float) -> Int|Float */
 		obj_type *l = infer(node->kids[0], sc);
 		obj_type *r = infer(node->kids[1], sc);
-		if (l->ret != RET_INT && l->ret != RET_VAR)
-			type_err(node->tok, "arithmetic operand must be Int, got %s",
+		if (l->ret != RET_INT && l->ret != RET_FLOAT && l->ret != RET_VAR)
+			type_err(node->tok, "arithmetic operand must be Int or Float, got %s",
 			         ret_kind_name(l->ret));
-		if (r->ret != RET_INT && r->ret != RET_VAR)
-			type_err(node->tok, "arithmetic operand must be Int, got %s",
+		if (r->ret != RET_INT && r->ret != RET_FLOAT && r->ret != RET_VAR)
+			type_err(node->tok, "arithmetic operand must be Int or Float, got %s",
 			         ret_kind_name(r->ret));
-		t = t_new(RET_INT);
+		t = t_new(l->ret == RET_FLOAT || r->ret == RET_FLOAT ? RET_FLOAT : RET_INT);
+		break;
+	}
+
+	case AST_NEG: {                      /* unary "-" : Int|Float -> Int|Float */
+		obj_type *o = infer(node->kids[0], sc);
+		if (o->ret != RET_INT && o->ret != RET_FLOAT && o->ret != RET_VAR)
+			type_err(node->tok, "'-' operand must be numeric, got %s",
+			         ret_kind_name(o->ret));
+		t = t_new(o->ret == RET_FLOAT ? RET_FLOAT : RET_INT);
 		break;
 	}
 

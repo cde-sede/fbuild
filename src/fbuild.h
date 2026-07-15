@@ -16,7 +16,7 @@
 
 #include <stddef.h>
 
-#define FBUILD_ABI 1              /* bump on any incompatible ABI change */
+#define FBUILD_ABI 2              /* bump on any incompatible ABI change */
 
 typedef struct fb_State fb_State; /* opaque interpreter state            */
 typedef struct fb_val  *fb_Value; /* opaque value handle (arena-owned)   */
@@ -25,6 +25,7 @@ typedef struct fb_val  *fb_Value; /* opaque value handle (arena-owned)   */
 typedef enum {
 	FB_NIL = 0,
 	FB_INT,
+	FB_FLOAT,
 	FB_STR,
 	FB_BOOL,
 	FB_FILE,
@@ -42,6 +43,7 @@ typedef enum {
 typedef enum {
 	FB_RET_ANY = 0,
 	FB_RET_INT,
+	FB_RET_FLOAT,
 	FB_RET_STR,
 	FB_RET_BOOL,
 	FB_RET_FILE,
@@ -143,11 +145,14 @@ const fb_Reg *fb_reg_findn(const char *name, size_t len); /* slice-friendly */
 /* ---- value constructors ----------------------------------------------- */
 fb_Value fb_nil (fb_State *S);
 fb_Value fb_int (fb_State *S, long v);
+fb_Value fb_float(fb_State *S, double v);
 fb_Value fb_bool(fb_State *S, int v);
 fb_Value fb_str (fb_State *S, const char *s);
 fb_Value fb_file(fb_State *S, const char *path);
 fb_Value fb_list(fb_State *S);
 void     fb_push(fb_State *S, fb_Value list, fb_Value e);
+fb_Value fb_tuple(fb_State *S);                              /* an empty tuple */
+void     fb_tuple_push(fb_State *S, fb_Value tuple, fb_Value e);
 fb_Value fb_map (fb_State *S);
 void     fb_set (fb_State *S, fb_Value map, const char *key, fb_Value v);
 fb_Value fb_cmd (fb_State *S);                       /* an empty command (argv) */
@@ -156,6 +161,7 @@ void     fb_cmd_push(fb_State *S, fb_Value cmd, fb_Value word); /* append a word
 /* ---- value inspection ------------------------------------------------- */
 fb_Kind     fb_kind (fb_Value v);
 long        fb_toint(fb_Value v);
+double      fb_tofloat(fb_Value v);
 const char *fb_tostr(fb_State *S, fb_Value v);   /* coerces int/bool/file  */
 int         fb_len  (fb_Value v);                /* list/tuple/map size    */
 fb_Value    fb_at   (fb_Value v, int i);         /* list/tuple/map value #i */

@@ -119,10 +119,10 @@ Register **before** `fb_dostring`/`fb_dofile` so the type checker sees the name.
 `fb_Value` is an opaque handle into the interpreter arena. Never free it; it
 lives until `fb_close`.
 
-Construct: `fb_nil fb_int fb_bool fb_str fb_file fb_list fb_push fb_map fb_set
+Construct: `fb_nil fb_int fb_float fb_bool fb_str fb_file fb_list fb_push fb_map fb_set
 fb_cmd fb_cmd_push`.
 
-Inspect: `fb_kind fb_toint fb_tostr fb_len fb_at fb_field fb_key`.
+Inspect: `fb_kind fb_toint fb_tofloat fb_tostr fb_len fb_at fb_field fb_key`.
 
 ```c
 fb_Value m = fb_map(S);
