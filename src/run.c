@@ -18,7 +18,7 @@
 /* This TU owns the single static build_info (.my_metadata) that
  * fbuild_version() reads back, so it defines METADATA_LIST before the header
  * pulls in build.h. */
-#define FBUILD_VERSION "0.2.4"
+#define FBUILD_VERSION "0.2.5"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 
@@ -673,7 +673,6 @@ static void bind_params(renv *e, ast *params, rval *arg) {
  * So several independent interpreters can coexist (they don't run interleaved,
  * matching the single-threaded coroutine model). Declared before apply()
  * because apply dispatches native callables (RV_CFUN) through g_active. */
-struct fb_class;
 #define FB_MAX_REG 10240   /* core builtins + host/plugin (full raylib ~660) */
 #define FB_MAX_BINDS 64    /* plugin-bound global identifiers (fb_global_bind) */
 
@@ -687,7 +686,7 @@ typedef struct {
 	char **print_q; size_t print_n, print_cap;
 	fb_Reg regs[FB_MAX_REG]; int nreg;
 	fb_bind binds[FB_MAX_BINDS]; int nbinds;
-	struct fb_class *classes;
+	rval  *classes;
 	rval  *spinner;
 } fb_globals;
 
@@ -921,42 +920,48 @@ rval *fb_dispatch(const fb_Reg *rg, rval **as, size_t k) {
  * Both the language (`type`/`method`) and the ABI (fb_class/fb_method) build on
  * this. */
 
-static fb_class_t *g_classes;
+static rval *g_classes;   /* RV_CLASS list, linked via ->cls (see rkind) */
 
-static fb_class_t *class_find(const char *name) {
-	for (fb_class_t *c = g_classes; c; c = c->next)
-		if (!strcmp(c->name, name)) return c;
+static rval *class_find(const char *name) {
+	for (rval *c = g_classes; c; c = (rval *)c->cls)
+		if (!strcmp(c->s, name)) return c;
 	return NULL;
 }
-static fb_class_t *class_ensure(const char *name) {
-	fb_class_t *c = class_find(name);
+static rval *class_ensure(const char *name) {
+	rval *c = class_find(name);
 	if (c) return c;
-	c = a_alloc(sizeof *c);
-	c->name = a_dup(name);
-	c->methods = NULL; c->nmethods = c->cap = 0;
-	c->next = g_classes; g_classes = c;
+	c = rv(RV_CLASS);
+	c->s = a_dup(name);
+	c->cls = g_classes;   /* intrusive next-ptr, not a class (this IS one) */
+	g_classes = c;
 	return c;
 }
-static void class_add_method(fb_class_t *c, const char *name, rval *val) {
-	for (size_t i = 0; i < c->nmethods; i++)
-		if (!strcmp(c->methods[i].name, name)) { c->methods[i].val = val; return; }
-	if (c->nmethods == c->cap) {
-		size_t nc = c->cap ? c->cap * 2 : 4;
-		c->methods = a_grow(c->methods, c->cap * sizeof *c->methods, nc * sizeof *c->methods);
-		c->cap = nc;
-	}
-	c->methods[c->nmethods].name = a_dup(name);
-	c->methods[c->nmethods].val  = val;
-	c->nmethods++;
+/* methods are stored map-shaped (keys/items), so this is just map_set. */
+static void class_add_method(rval *c, const char *name, rval *val) {
+	map_set(c, a_dup(name), val);
 }
-static rval *class_method(fb_class_t *c, const char *name) {
+static rval *class_method(rval *c, const char *name) {
 	if (!c) return NULL;
-	for (size_t i = 0; i < c->nmethods; i++)
-		if (!strcmp(c->methods[i].name, name)) return c->methods[i].val;
+	for (size_t i = 0; i < c->n; i++)
+		if (!strcmp(c->keys[i], name)) return c->items[i];
 	return NULL;
 }
+
+/* true when every key in a `{ "k": v, ... }` fields body is a literal,
+ * non-interpolated string -- a bareword key desugars to this shape too (see
+ * TOK_LBRACE in build_system.c). Such a key can't depend on args/env, so the
+ * key set is identical on every evaluation of this body, letting AST_OBJNEW
+ * capture it once per class instead of re-evaluating/re-allocating it on
+ * every construction. */
+static int objnew_keys_static(ast *body) {
+	for (size_t i = 0; i < body->nkids; i++) {
+		ast *key = body->kids[i]->kids[0];
+		if (key->kind != AST_STRING || key->nkids != 0) return 0;
+	}
+	return 1;
+}
 /* build an object of class c: share `fields`' map slots (if any) + native data */
-static rval *make_object(fb_class_t *c, rval *fields, void *nat) {
+static rval *make_object(rval *c, rval *fields, void *nat) {
 	rval *o = rv(RV_OBJECT);
 	o->cls = c; o->nat = nat;
 	if (fields && (fields->k == RV_MAP || fields->k == RV_OBJECT)) {
@@ -969,15 +974,18 @@ static rval *make_cfun(fb_CFunction fn) {
 	rval *v = rv(RV_CFUN); v->nat = (void *)fn; return v;
 }
 
-/* ABI: define classes, attach native methods, instantiate native objects. */
+/* ABI: define classes, attach native methods, instantiate native objects.
+ * fb_Class is a distinct opaque type from fb_Value at the ABI boundary (so the
+ * compiler still catches a class passed where a value is expected), but is
+ * internally the same rval arena representation (kind RV_CLASS). */
 fb_Class fb_class(fb_State *S, const char *name) {
 	fb_activate(S); return (fb_Class)class_ensure(name);
 }
 void fb_method(fb_State *S, fb_Class c, const char *name, fb_CFunction fn) {
-	fb_activate(S); class_add_method((fb_class_t *)c, name, make_cfun(fn));
+	fb_activate(S); class_add_method((rval *)c, name, make_cfun(fn));
 }
 fb_Value fb_object(fb_State *S, fb_Class c, void *data) {
-	fb_activate(S); return (fb_Value)make_object((fb_class_t *)c, NULL, data);
+	fb_activate(S); return (fb_Value)make_object((rval *)c, NULL, data);
 }
 void *fb_object_data(fb_Value v) {
 	rval *r = (rval *)v;
@@ -1403,7 +1411,7 @@ rval *eval(ast *n, renv *e) {
 			return file_field_s(base, as_cstr(k));
 		}
 		if (base->k == RV_OBJECT) {            /* method (unbound) or field */
-			rval *m = class_method((fb_class_t *)base->cls, dup_tok(n->tok));
+			rval *m = class_method((rval *)base->cls, dup_tok(n->tok));
 			return m ? m : map_get(base, dup_tok(n->tok));
 		}
 		if (base->k == RV_MAP)                 /* m.key -> map lookup */
@@ -1414,13 +1422,38 @@ rval *eval(ast *n, renv *e) {
 	}
 
 	case AST_OBJNEW: {                     /* tag a fields map as an object */
-		fb_class_t *c = class_ensure(dup_tok(n->tok));
-		rval *fields = eval(n->kids[0], e);
+		rval *c = class_ensure(dup_tok(n->tok));
+		ast *body = n->kids[0];
+		if (body->kind == AST_MAPLIT && objnew_keys_static(body)) {
+			/* static schema: (re)capture the key array on the class only
+			 * when it doesn't already match this body's field count -- the
+			 * common case (one `type` decl per class name) captures once
+			 * and every later construction skips straight to evaluating
+			 * values. */
+			if (c->i != (long)body->nkids) {
+				char **schema = a_alloc(body->nkids * sizeof *schema);
+				for (size_t i = 0; i < body->nkids; i++) {
+					token *kt = body->kids[i]->kids[0]->tok;
+					schema[i] = str_unescape(kt->string, kt->len);
+				}
+				c->nat = schema;
+				c->i = (long)body->nkids;
+			}
+			rval *o = rv(RV_OBJECT);
+			o->cls = c;
+			o->keys = (char **)c->nat;
+			o->n = o->cap = (size_t)c->i;
+			o->items = a_alloc((size_t)c->i * sizeof *o->items);
+			for (size_t i = 0; i < body->nkids; i++)
+				o->items[i] = eval(body->kids[i]->kids[1], e);
+			return o;
+		}
+		rval *fields = eval(body, e);
 		return make_object(c, fields, NULL);
 	}
 
 	case AST_METHODDEF: {                  /* method Class.name = lambda */
-		fb_class_t *c = class_ensure(dup_tok(n->kids[0]->tok));
+		rval *c = class_ensure(dup_tok(n->kids[0]->tok));
 		rval *m = eval(n->kids[1], e);
 		class_add_method(c, dup_tok(n->tok), m);
 		return &RV_UNIT;
@@ -1557,16 +1590,27 @@ rval *eval(ast *n, renv *e) {
 			return do_parse(schema, argv);
 		}
 		/* method call obj.m(args): if the base is an object whose class defines
-		 * `m`, apply the method to (self, ...args). Otherwise fall through (the
-		 * field may hold a plain callable). */
+		 * `m`, apply the method to (self, ...args) -- unless `m`'s param list
+		 * has more than one name (`method Class.m = a, b -> ...`, parens
+		 * around it are just grouping, same AST either way), in which case
+		 * those names destructure self's fields BY NAME instead: each param
+		 * whose name matches one of self's keys gets that field's value.
+		 * Otherwise fall through (the field may hold a plain callable). */
 		if (callee->kind == AST_FIELD && callee->tok && callee->nkids == 1) {
 			rval *self = eval(callee->kids[0], e);
 			if (self->k == RV_OBJECT) {
-				rval *m = class_method((fb_class_t *)self->cls, dup_tok(callee->tok));
+				rval *m = class_method((rval *)self->cls, dup_tok(callee->tok));
 				if (m) {
 					size_t k; rval **as = eval_args(n, e, &k);
 					rval *arg;
-					if (k == 0) {
+					if (m->k == RV_LAMBDA && m->params->nkids > 1) {
+						arg = rv(RV_TUPLE);
+						for (size_t i = 0; i < m->params->nkids; i++) {
+							ast *p = m->params->kids[i];
+							rv_push(arg, (p->kind == AST_ID && p->tok)
+							             ? map_get(self, dup_tok(p->tok)) : &RV_UNIT);
+						}
+					} else if (k == 0) {
 						arg = self;
 					} else {
 						arg = rv(RV_TUPLE);

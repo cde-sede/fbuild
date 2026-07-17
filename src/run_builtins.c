@@ -515,7 +515,7 @@ static void repr(sbuf *s, rval *v) {
 	case RV_THUNK:   sb_puts(s, "<thunk>");                     break;
 	case RV_CFUN:    sb_puts(s, "<method>");                    break;
 	case RV_OBJECT:
-		sb_puts(s, v->cls ? ((fb_class_t *)v->cls)->name : "object");
+		sb_puts(s, v->cls ? ((rval *)v->cls)->s : "object");
 		sb_putc(s, '{');
 		for (size_t i = 0; i < v->n; i++) {
 			if (i) sb_puts(s, ", ");
@@ -523,6 +523,7 @@ static void repr(sbuf *s, rval *v) {
 		}
 		sb_putc(s, '}');
 		break;
+	case RV_CLASS:   sb_puts(s, "<class "); sb_puts(s, v->s ? v->s : ""); sb_puts(s, ">"); break;
 	}
 }
 
@@ -576,7 +577,7 @@ static void debug_repr(sbuf *s, rval *v) {
 	case RV_THUNK:   sb_puts(s, "Thunk");                       break;
 	case RV_CFUN:    sb_puts(s, "Method");                      break;
 	case RV_OBJECT:
-		sb_puts(s, v->cls ? ((fb_class_t *)v->cls)->name : "Object");
+		sb_puts(s, v->cls ? ((rval *)v->cls)->s : "Object");
 		sb_putc(s, '{');
 		for (size_t i = 0; i < v->n; i++) {
 			if (i) sb_puts(s, ", ");
@@ -585,6 +586,7 @@ static void debug_repr(sbuf *s, rval *v) {
 		}
 		sb_putc(s, '}');
 		break;
+	case RV_CLASS:   sb_puts(s, "Class(\""); sb_puts(s, v->s ? v->s : ""); sb_puts(s, "\")"); break;
 	}
 }
 

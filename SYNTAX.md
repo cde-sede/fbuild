@@ -50,11 +50,22 @@ Call a method with `obj.MNAME(args)` — `obj` is passed as the first (self)
 argument. `obj.field` reads a field; `obj.MNAME` (no call) yields the method
 unbound.
 
+If the method's lambda takes more than one parameter (`method Point.len =
+x, y -> ...` or the same thing with parens, `(x, y) -> ...`), `self` is NOT
+passed positionally — instead each param is destructured BY NAME from the
+receiver's fields (`x` gets `self.x`, `y` gets `self.y`; a param with no
+matching field gets `()`), and any extra call arguments are ignored for
+binding. A single-parameter method lambda keeps the old convention (that one
+param IS the whole receiver, however it's named).
+
 ## Expressions (loosest → tightest precedence)
 
 1. **assignment / store** `NAME = e`, `NAME ~= e`, `LVALUE <- e`
 2. **tuple** `a, b, c` (comma) → a Tuple
-3. **lambda** `params -> body` (`x -> ...`, `a, b -> ...`, `@rest -> ...`, `.f -> ...`)
+3. **lambda** `params -> body` (`x -> ...`, `a, b -> ...`, `@rest -> ...`, `.f -> ...`,
+   `(a, b) -> ...`: parens around the param list are grouping only, identical
+   AST to the unparenthesized form -- allowed only when every element is a
+   plain identifier)
 4. **sequence** `a >> b` (ordered; build dependency)
 5. **pipe** `a |> f` (= `f(a)`; maps element-wise over a list/tuple)
 6. **guard** `e where b = v, ... when cond` (also `e when cond`)

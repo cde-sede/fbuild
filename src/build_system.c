@@ -912,6 +912,34 @@ static ast *parse_atom(void) {
 		}
 		ast *n = parse_expression();
 		expect(.kind = TOK_RPAREN);
+		if (accept(.kind = TOK_ARROW)) {
+			/* "(params) -> body": parenthesized param list, e.g. as a method
+			 * body destructuring self by name: `method Point.len = (x, y) ->
+			 * math.sqrt(x*x + y*y)` (AST_CALL's method dispatch treats a
+			 * multi-param method lambda this way). The parens are otherwise
+			 * just grouping -- `x, y -> body` parses to the same params
+			 * shape -- so every element must be a plain identifier, same as
+			 * parse_parameter's bare-id case. */
+			skip_nl();
+			ast *params = node(AST_PARAMS);
+			if (n->kind == AST_TUPLE) {
+				for (size_t i = 0; i < n->nkids; i++) {
+					if (n->kids[i]->kind != AST_ID)
+						die("parenthesized lambda parameter must be a plain identifier at %d:%d",
+						    t->start.line, t->start.col);
+					push(params, n->kids[i]);
+				}
+			} else if (n->kind == AST_ID) {
+				push(params, n);
+			} else {
+				die("parenthesized lambda parameter must be a plain identifier at %d:%d",
+				    t->start.line, t->start.col);
+			}
+			ast *lam = node(AST_LAMBDA);
+			push(lam, params);
+			push(lam, g_no_tuple ? parse_expr_no_tuple() : parse_expression());
+			return lam;
+		}
 		if (n->kind == AST_SPLAT) {  /* (...x): materialize the spread tuple */
 			ast *tup = node(AST_TUPLE);
 			push(tup, n);

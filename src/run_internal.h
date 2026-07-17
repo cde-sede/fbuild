@@ -80,6 +80,15 @@ typedef enum {
 	RV_THUNK,       /* unevaluated arg to an FB_LAZY builtin (body + env)  */
 	RV_OBJECT,      /* tagged object: cls + fields(keys/items) + nat data  */
 	RV_CFUN,        /* native callable (nat = fb_CFunction); a method impl */
+	RV_CLASS,       /* class descriptor: name (.s) + methods (map-shaped:
+	                 * keys/items/n/cap); .cls doubles as the intrusive
+	                 * next-ptr in the class registry (g_classes). When every
+	                 * instance has a statically-known field set (literal,
+	                 * non-interpolated map keys in a `type` body -- see
+	                 * objnew_keys_static in run.c), .i/.nat double again as
+	                 * the cached field schema: .i = field count, .nat =
+	                 * char** of field names shared read-only by every
+	                 * instance (RV_OBJECT.keys points straight at it) */
 } rkind;
 
 typedef struct rval rval;
@@ -111,7 +120,8 @@ struct rval {
 		struct { char *from, *to; };  /* morphism patterns             */
 	};
 	char   *label;      /* def name, for group display         */
-	void   *cls;        /* RV_OBJECT: its class (struct fb_class*) */
+	void   *cls;        /* RV_OBJECT: its class (rval* of kind RV_CLASS);
+	                     * RV_CLASS: intrusive next-ptr, see rkind above */
 	void   *nat;        /* RV_OBJECT: native data; RV_CFUN: fb_CFunction */
 };
 
@@ -121,15 +131,6 @@ struct rbind { token *name; rval *val; struct rbind *next; };
  * always zero-initialized (arena or static), so nslots starts at 0. */
 struct renv  { struct rbind *head; rval *arg; renv *parent;
                struct rbind slots[2]; int nslots; };
-
-/* tagged-object class (RV_OBJECT). Shared so repr() (run_builtins.c) can name
- * an object; the class table itself is managed in run.c. */
-typedef struct fb_class {
-	char *name;
-	struct { char *name; rval *val; } *methods;
-	size_t nmethods, cap;
-	struct fb_class *next;
-} fb_class_t;
 
 /* the shared unit value; single definition lives in run.c */
 extern rval RV_UNIT;
