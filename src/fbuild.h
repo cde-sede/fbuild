@@ -50,6 +50,7 @@ typedef enum {
 	FB_RET_LIST,
 	FB_RET_MAP,
 	FB_RET_UNIT,
+	FB_RET_LIST_STR,   /* List<String> (FB_RET_LIST is an untyped list) */
 } fb_Ret;
 
 /* A builtin: by default receives its already-evaluated arguments (splats
@@ -61,7 +62,10 @@ typedef enum {
 typedef fb_Value (*fb_CFunction)(fb_State *S, fb_Value *args, int nargs);
 
 /* fb_Reg.flags */
-#define FB_LAZY 1u    /* args are thunks; force them with fb_force() */
+#define FB_LAZY   1u  /* args are thunks; force them with fb_force() */
+#define FB_GLOBAL 2u  /* name denotes a bound global value (fb_global_bind),
+                       * not a callable -- the checker types a bare reference
+                       * to it from `ret` directly instead of RET_VAR. */
 
 /* Registration record. `max < 0` means variadic. `ret` drives type inference. */
 typedef struct {

@@ -223,10 +223,11 @@ int fbuild_open(fb_State *S) {
 	fb_method(S, cls, "replaceall", m_replaceall);
 	fb_method(S, cls, "split",      m_split);
 
-	/* registered so the type checker recognizes the bare identifier `regex`;
-	 * the real value comes from fb_global_bind below, which eval() resolves
-	 * first, so this fn only runs if someone calls `regex(...)` directly. */
-	fb_register(S, &(fb_Reg){ "regex", bi_regex_noncallable, 0, -1, FB_RET_ANY, 0 });
+	/* registered so the type checker recognizes the bare identifier `regex`
+	 * (FB_GLOBAL: a bound value, not a callable); the real value comes from
+	 * fb_global_bind below, which eval() resolves first, so this fn only runs
+	 * if someone calls `regex(...)` directly. */
+	fb_register(S, &(fb_Reg){ "regex", bi_regex_noncallable, 0, -1, FB_RET_ANY, FB_GLOBAL });
 	fb_global_bind(S, "regex", fb_object(S, cls, NULL));
 	return 0;
 }

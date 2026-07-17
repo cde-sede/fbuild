@@ -1054,6 +1054,13 @@ static fb_Value w_bench(fb_State*S,fb_Value*a,int n){(void)n;
 	return (fb_Value)r; }
 /* run(targets...): build a target (single, or a tuple = parallel), run it,
  * return whether it carried any work. Eager: args are evaluated commands/seqs. */
+/* registered so the type checker recognizes the bare identifiers `args`/`cwd`
+ * (FB_GLOBAL: typed from `ret`, not RET_VAR); the real values are bound by
+ * run_program via fb_global_bind, which eval() resolves first, so this only
+ * runs if someone calls args(...)/cwd(...) directly. */
+static fb_Value w_global_noncallable(fb_State*S,fb_Value*a,int n){(void)a;(void)n;
+	return fb_error(S, "not callable"); }
+
 static fb_Value w_run(fb_State*S,fb_Value*a,int n){(void)S;
 	rval *target;
 	if (n == 1) target = AR(0);
@@ -1103,6 +1110,9 @@ void fb_open_base(fb_State *S) {
 		/* cli args */
 		{"flag",w_flag,1,-1,FB_RET_BOOL,0}, {"opt",w_opt,2,2,FB_RET_STR,0},
 		{"positionals",w_positionals,0,0,FB_RET_LIST,0},
+		/* CLI globals (bound values, not calls; see run_program's fb_global_bind) */
+		{"args",w_global_noncallable,0,-1,FB_RET_LIST_STR,FB_GLOBAL},
+		{"cwd",w_global_noncallable,0,-1,FB_RET_STR,FB_GLOBAL},
 	};
 	for (size_t i = 0; i < sizeof base / sizeof base[0]; i++)
 		fb_register(S, &base[i]);

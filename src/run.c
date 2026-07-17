@@ -18,7 +18,7 @@
 /* This TU owns the single static build_info (.my_metadata) that
  * fbuild_version() reads back, so it defines METADATA_LIST before the header
  * pulls in build.h. */
-#define FBUILD_VERSION "0.2.2"
+#define FBUILD_VERSION "0.2.3"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 
@@ -1289,8 +1289,6 @@ rval *eval(ast *n, renv *e) {
 		if (b) return b;
 		rval *d = def_lookup(n->tok);
 		if (d) return d;
-		if (tok_is(n->tok, "args")) return g_args;   /* CLI args list */
-		if (tok_is(n->tok, "cwd")) return g_cwd;   /* CLI args list */
 		if (tok_is(n->tok, "_GLOBALS")) return store_globals();
 		if (tok_is(n->tok, "_SHARED"))  return store_shared();
 		rval *bv = fb_bind_lookup(n->tok);   /* plugin global (fb_global_bind) */
@@ -1671,6 +1669,13 @@ void run_program(ast *prog, int argc, char **argv) {
 	g_cwd = rv(RV_STR);
 	g_cwd->s = a_alloc(1024);
 	getcwd(g_cwd->s, 1024);
+
+	/* publish for bare-identifier lookup (fb_bind_lookup, checked in AST_ID
+	 * eval) the same way a plugin exposes a namespace object -- `args`/`cwd`
+	 * are core state, not CLI-only, so the bind happens here rather than in
+	 * main.c (see fb_open_base for their FB_GLOBAL registration). */
+	fb_global_bind(g_active, "args", (fb_Value)g_args);
+	fb_global_bind(g_active, "cwd", (fb_Value)g_cwd);
 
 	g_ndefs = 0;
 	for (size_t i = 0; i < prog->nkids; i++) {

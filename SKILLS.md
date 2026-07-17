@@ -244,9 +244,17 @@ object -> Map, array -> List, number -> Int|Float(real), bool -> Bool, null -> (
 ```
 args     : List<String>
 cwd      : String
+script   : String                     path of the .fb file being run (CLI-bound, see below)
+plugins  : List<String>               loaded plugin .so paths (--plugin + $FBUILD_PLUGINS + $FBUILD_PLUGIN_PATH)
 _GLOBALS : Map                        per-interpreter mutable store (see below)
 _SHARED  : Map                        process-global mutable store (all states/plugins)
 ```
+All four are bound with `fb_global_bind`, the same mechanism a plugin uses for
+a bare namespace object (e.g. `regex`) — not special-cased in the AST_ID
+lookup. `args`/`cwd` are core interpreter state, bound by `run_program` on
+every run; `script`/`plugins` are CLI-only, bound by `fbuild`'s `main()` — an
+embedder that calls `fb_dofile` directly without going through main.c won't
+see `script`/`plugins` unless it binds them itself.
 
 ### mutable stores
 

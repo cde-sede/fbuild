@@ -139,6 +139,7 @@ static obj_type *fb_ret_type(fb_Ret r) {
 	case FB_RET_BOOL: return t_new(RET_BOOL);
 	case FB_RET_FILE: return t_file();
 	case FB_RET_LIST: return t_list(t_new(RET_VAR));
+	case FB_RET_LIST_STR: return t_list(t_new(RET_STRING));
 	case FB_RET_UNIT: return t_new(RET_NONE);
 	case FB_RET_MAP:
 	case FB_RET_ANY:
@@ -341,12 +342,13 @@ static obj_type *infer_id(token *name) {
 				return infer(s->kids[0], NULL);   /* defs are context-free */
 		}
 	}
-	if (tok_is(name, "args"))          /* CLI args */
-		return t_list(t_new(RET_STRING));
-	if (tok_is(name, "cwd"))           /* builtin cwd */
-		return t_new(RET_STRING);
 	if (tok_is(name, "_GLOBALS") || tok_is(name, "_SHARED"))
 		return t_new(RET_VAR);         /* mutable store: dynamic map */
+	{
+		const fb_Reg *rg = fb_reg_findn(name->string, name->len);
+		if (rg && (rg->flags & FB_GLOBAL))   /* bound global value: type from `ret` */
+			return fb_ret_type(rg->ret);
+	}
 	if (is_builtin_name(name))
 		return t_new(RET_VAR);
 	type_err(name, "unknown symbol '%.*s'",

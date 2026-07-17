@@ -16,6 +16,16 @@
 
 #define die(msg, ...) do { fprintf(stderr, "error:" msg "\n", ##__VA_ARGS__); exit(1); } while (0)
 
+/* registered so the type checker recognizes the bare identifiers `script` and
+ * `plugins`; the real values come from fb_global_bind below, which eval()
+ * resolves first, so these only run if someone calls script(...)/plugins(...)
+ * directly. Same pattern a plugin uses for a bare namespace object (see
+ * plugins/fbregex.c). */
+static fb_Value cli_global_noncallable(fb_State *S, fb_Value *a, int n) {
+	(void)a; (void)n;
+	return fb_error(S, "not callable");
+}
+
 /* SIGINT: the build runs nested event loops with spinners that hide the cursor,
  * so on Ctrl-C restore the cursor and print a notice. Only async-signal-safe
  * calls here (write, munmap via arena_fini, _exit). isatty cached at startup. */
@@ -149,8 +159,25 @@ int main(int ac, char **av) {
 		return 0;
 	}
 
+	if (!script) script = find_script();
+
+	/* expose `script` (the .fb path being run) and `plugins` (loaded .so
+	 * paths, --plugin + $FBUILD_PLUGINS + $FBUILD_PLUGIN_PATH) to the script
+	 * via the same bind mechanism a plugin would use -- main.c is just
+	 * another consumer of the extension ABI, not a special case in the
+	 * interpreter core. fb_load_env_plugins is idempotent, so calling it here
+	 * to finalize the list before fb_dofile calls it again is safe. */
+	if (fb_load_env_plugins(S)) die("%s", fb_error_msg(S));
+	fb_register(S, &(fb_Reg){ "script", cli_global_noncallable, 0, -1, FB_RET_STR, FB_GLOBAL });
+	fb_register(S, &(fb_Reg){ "plugins", cli_global_noncallable, 0, -1, FB_RET_LIST_STR, FB_GLOBAL });
+	fb_global_bind(S, "script", fb_str(S, script));
+	fb_Value plugins = fb_list(S);
+	for (int i = 0; i < fb_plugin_count(S); i++)
+		fb_push(S, plugins, fb_str(S, fb_plugin_path(S, i)));
+	fb_global_bind(S, "plugins", plugins);
+
 	fb_set_args(S, fc, av);
-	int rc = fb_dofile(S, script ? script : find_script());
+	int rc = fb_dofile(S, script);
 	if (rc && fb_error_msg(S)[0])
 		fprintf(stderr, "error: %s\n", fb_error_msg(S));
 	fb_close(S);

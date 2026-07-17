@@ -167,8 +167,10 @@ fb_method(S, RE, "findall", m_findall);
 /* ...other methods... */
 
 /* type checker must recognize the bare name; the fn only runs if someone
- * calls regex(...) directly instead of a method, so make it fb_error */
-fb_register(S, &(fb_Reg){ "regex", bi_regex_noncallable, 0, -1, FB_RET_ANY, 0 });
+ * calls regex(...) directly instead of a method, so make it fb_error.
+ * FB_GLOBAL tells the checker this identifier is a bound value, not a
+ * callable, so a bare reference types from `ret` instead of RET_VAR. */
+fb_register(S, &(fb_Reg){ "regex", bi_regex_noncallable, 0, -1, FB_RET_ANY, FB_GLOBAL });
 fb_global_bind(S, "regex", fb_object(S, RE, NULL));
 ```
 
@@ -177,6 +179,12 @@ print(regex.findall("a1 b22 c333", "[0-9]+"))   # [1, 22, 333] -- no constructio
 ```
 
 A script-level `regex = ...` def still shadows the bind (defs resolve first).
+
+For a plain data value (not an object with methods) where the precise type
+matters — e.g. a bound `List<String>` — declare `ret` accordingly
+(`FB_RET_LIST_STR` for `List<String>`, or one of the other `FB_RET_*` scalars);
+`fbuild`'s own `args`/`cwd`/`script`/`plugins` globals use this (see `src/main.c`,
+`src/run_builtins.c`).
 See `plugins/fbregex.c` for the full worked example.
 
 ## ABI stability
