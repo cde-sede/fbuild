@@ -18,7 +18,7 @@
 /* This TU owns the single static build_info (.my_metadata) that
  * fbuild_version() reads back, so it defines METADATA_LIST before the header
  * pulls in build.h. */
-#define FBUILD_VERSION "0.2.3"
+#define FBUILD_VERSION "0.2.4"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 

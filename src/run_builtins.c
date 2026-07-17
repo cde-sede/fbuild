@@ -6,6 +6,7 @@
  * (both directions) are declared in run_internal.h. */
 
 #include "run_internal.h"
+#include <errno.h>
 
 static rval *do_clock(void) {
 	struct timespec ts;
@@ -222,8 +223,9 @@ static rval *do_mkdir(rval *d) {               /* mkdir -p */
 	char tmp[4096];
 	snprintf(tmp, sizeof tmp, "%s", p);
 	for (char *s = tmp + 1; *s; s++)
-		if (*s == '/') { *s = '\0'; mkdir(tmp, 0755); *s = '/'; }
-	mkdir(tmp, 0755);
+		if (*s == '/') { *s = '\0'; mkdir(tmp, 0755); *s = '/'; }   /* intermediate: EEXIST is fine */
+	if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
+		return (rval *)fb_error(g_active, "mkdir '%s': %s", p, strerror(errno));
 	return rv_file(a_dup(p));
 }
 
@@ -243,33 +245,44 @@ static rval *do_read(rval *f) {
 }
 
 static rval *do_write(rval *f, rval *content) {
-	FILE *fp = fopen(pstr(f), "wb");
-	if (fp) { fputs(as_cstr(content), fp); fclose(fp); }
-	return (f && f->k == RV_FILE) ? f : rv_file(a_dup(pstr(f)));
+	const char *p = pstr(f);
+	FILE *fp = fopen(p, "wb");
+	if (!fp)
+		return (rval *)fb_error(g_active, "write '%s': %s", p, strerror(errno));
+	int ok = fputs(as_cstr(content), fp) != EOF;
+	int e = errno;
+	if (fclose(fp) != 0 && ok) { ok = 0; e = errno; }
+	if (!ok)
+		return (rval *)fb_error(g_active, "write '%s': %s", p, strerror(e));
+	return (f && f->k == RV_FILE) ? f : rv_file(a_dup(p));
 }
 
-/* raw byte copy of src -> dst, preserving src's mode. */
+/* raw byte copy of src -> dst, preserving src's mode. Returns 0 on success,
+ * -1 with errno set (from the failing syscall) otherwise. */
 static int file_copy(const char *src, const char *dst) {
 	int in = open(src, O_RDONLY);
-	if (in < 0) return 0;
+	if (in < 0) return -1;
 	struct stat st;
 	mode_t mode = (fstat(in, &st) == 0) ? st.st_mode & 0777 : 0644;
 	int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC, mode);
-	if (out < 0) { close(in); return 0; }
+	if (out < 0) { int e = errno; close(in); errno = e; return -1; }
 	char buf[1 << 16];
 	ssize_t r;
 	int ok = 1;
 	while ((r = read(in, buf, sizeof buf)) > 0)
 		if (write(out, buf, (size_t)r) != r) { ok = 0; break; }
 	if (r < 0) ok = 0;
+	int e = errno;
 	close(in);
 	close(out);
-	return ok;
+	errno = e;
+	return ok ? 0 : -1;
 }
 
 static rval *do_copy(rval *a, rval *b) {
 	const char *s = pstr(a), *d = pstr(b);
-	file_copy(s, d);
+	if (file_copy(s, d) != 0)
+		return (rval *)fb_error(g_active, "copy '%s' -> '%s': %s", s, d, strerror(errno));
 	return rv_file(a_dup(d));
 }
 
