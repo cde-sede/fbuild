@@ -59,6 +59,10 @@ Tuple<a, ...xs, b>              build a tuple from values + splats
 List<a, ...xs, b>               build a real List from values + splats
 Map<(k,v), (k2,v2), ...>        build a map from key/value pairs
 { "k": v, k2: v2 }              map literal (sugar); keys: string or bare word
+{ x, y }                        shorthand entries: `x` = `"x": x` (value from a
+                                 same-named local)
+{ ...m, "k": v }                spread m's key/values in (m: Map or object);
+                                 a later entry overrides an earlier spread one
 (...xs)                         splat materialized as a tuple
 seq |> e -> e                   any sequence -> List (promotion)
 ```
@@ -66,7 +70,25 @@ Map is an intrinsic type (was `map()`, now removed). `{}` is the empty map.
 A bare-word key is always its own literal text, even if a same-named variable
 is in scope (no accidental computed-key shadowing) -- parens don't change this,
 `(name)` parses down to the same identifier. For an actually computed key, use
-a string interpolation: `"{expr}": v`.
+a string interpolation: `"{expr}": v`. Spreading a non-Map/object value
+(`{ ...5 }`) is a runtime error, not a silent no-op.
+
+Composing objects: field "inheritance" is just spread + a normal forwarding
+call, no dedicated syntax needed --
+```
+type Point(x, y)         = { x, y }
+type Point3D(x, y, z)    = { ...Point(x, y), z }
+type ColorPoint(x, y, c) = { ...Point(x, y), color: c }
+```
+stays fully positional at the call site (`Point3D(1, 2, 3)`); fields compose
+this way but methods don't come along for free -- `Point3D` starts with its
+own separate, empty method table. Copy methods in explicitly, eagerly (not a
+live parent chain -- see "method NAME.MNAME = expr" above for the two copy
+forms):
+```
+method Point3D.repr = Point.repr    # one method
+method Point3D.*    = Point.*       # every method Point has right now
+```
 
 ## custom objects
 

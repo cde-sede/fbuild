@@ -58,6 +58,24 @@ matching field gets `()`), and any extra call arguments are ignored for
 binding. A single-parameter method lambda keeps the old convention (that one
 param IS the whole receiver, however it's named).
 
+Method "inheritance" is an explicit, eager COPY, not a live parent chain:
+```
+method NEW.MNAME = OLD.OTHER    # copy/alias a single method from class OLD
+method NEW.*     = OLD.*        # copy every method OLD has right now
+```
+Both sides of `.*` must match (`NEW.* = OLD.otherMethod` is a parse error;
+so is `NEW.mname = OLD.*`). The copy happens once, at that point in the
+script — a method added to `OLD` afterward does NOT retroactively appear on
+`NEW` (no `super`, no live re-binding). `OLD.OTHER`/`OLD.*` is recognized as
+this bare copy-reference only when nothing follows it on the line; `OLD.fn(x)`
+or `OLD.fn + 1` fall through to the ordinary lambda-body expression instead
+(where plain field access on `OLD`, a constructor function, doesn't resolve
+to anything). This composes with field spread for full "subclassing":
+```
+type Point3D(x, y, z) = { ...Point(x, y), z }
+method Point3D.* = Point.*
+```
+
 ## Expressions (loosest → tightest precedence)
 
 1. **assignment / store** `NAME = e`, `NAME ~= e`, `LVALUE <- e`
@@ -97,10 +115,13 @@ capture             @        @name        (binds the call's argument / rest)
 projection          .name    .0           (field/index of the implicit arg)
 metadata            &e
 force               ~e                     (re-evaluate e, ignore memoization)
-splat               ...e                   (spread into a tuple/args/command)
+splat               ...e                   (spread into a tuple/args/command/map)
 tuple constructor   Tuple<a, ...xs, b>
 map constructor     Map<(k,v), (k2,v2)>
-map literal         { "k": v, k2: e }      (empty: {} ; keys: string or bare word)
+map literal         { "k": v, k2: e, x, ...m }   (empty: {} ; keys: string or bare
+                    word; `x` alone = `x: x` shorthand, value from a same-named
+                    local; `...m` spreads m's own key/values in, m a Map or object
+                    -- a later entry overrides an earlier spread one on collision)
 parser              Parser<schema>         (schema is a map; see SKILLS.md)
 ```
 

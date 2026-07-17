@@ -18,7 +18,7 @@
 /* This TU owns the single static build_info (.my_metadata) that
  * fbuild_version() reads back, so it defines METADATA_LIST before the header
  * pulls in build.h. */
-#define FBUILD_VERSION "0.2.5"
+#define FBUILD_VERSION "0.2.6"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 
@@ -947,15 +947,19 @@ static rval *class_method(rval *c, const char *name) {
 	return NULL;
 }
 
-/* true when every key in a `{ "k": v, ... }` fields body is a literal,
- * non-interpolated string -- a bareword key desugars to this shape too (see
- * TOK_LBRACE in build_system.c). Such a key can't depend on args/env, so the
- * key set is identical on every evaluation of this body, letting AST_OBJNEW
- * capture it once per class instead of re-evaluating/re-allocating it on
- * every construction. */
+/* true when every entry in a `{ "k": v, ... }` fields body is a plain
+ * AST_TUPLE(key, value) with a literal, non-interpolated string key -- a
+ * bareword or shorthand key desugars to this shape too (see TOK_LBRACE in
+ * build_system.c). A `...spread` entry is a bare AST_SPLAT, not a tuple, and
+ * its source is only known at runtime, so it always fails this check. Such a
+ * key can't depend on args/env, so the key set is identical on every
+ * evaluation of this body, letting AST_OBJNEW capture it once per class
+ * instead of re-evaluating/re-allocating it on every construction. */
 static int objnew_keys_static(ast *body) {
 	for (size_t i = 0; i < body->nkids; i++) {
-		ast *key = body->kids[i]->kids[0];
+		ast *entry = body->kids[i];
+		if (entry->kind != AST_TUPLE) return 0;   /* e.g. a ...spread entry */
+		ast *key = entry->kids[0];
 		if (key->kind != AST_STRING || key->nkids != 0) return 0;
 	}
 	return 1;
@@ -1339,10 +1343,20 @@ rval *eval(ast *n, renv *e) {
 		return t;
 	}
 
-	case AST_MAPLIT: {                     /* { k: v } and Map<(k,v),...> */
+	case AST_MAPLIT: {                     /* { k: v, ...spread } and Map<(k,v),...> */
 		rval *m = rv(RV_MAP);
 		for (size_t i = 0; i < n->nkids; i++) {
-			rval *kv = eval(n->kids[i], e);  /* each entry: a 2-tuple */
+			ast *entry = n->kids[i];
+			if (entry->kind == AST_SPLAT) {
+				rval *src = eval(entry->kids[0], e);
+				if (!src || (src->k != RV_MAP && src->k != RV_OBJECT))
+					return (rval *)fb_error(g_active,
+						"...: cannot spread a non-map/object value into a map literal");
+				for (size_t j = 0; j < src->n; j++)
+					map_set(m, a_dup(src->keys[j]), src->items[j]);
+				continue;
+			}
+			rval *kv = eval(entry, e);  /* each entry: a 2-tuple */
 			if (kv && (kv->k == RV_TUPLE || kv->k == RV_LIST) && kv->n >= 2)
 				map_set(m, a_dup(as_cstr(kv->items[0])), kv->items[1]);
 		}
@@ -1456,6 +1470,26 @@ rval *eval(ast *n, renv *e) {
 		rval *c = class_ensure(dup_tok(n->kids[0]->tok));
 		rval *m = eval(n->kids[1], e);
 		class_add_method(c, dup_tok(n->tok), m);
+		return &RV_UNIT;
+	}
+
+	case AST_METHODCOPY: {                 /* method New.m = Old.m2 / New.* = Old.* */
+		char *dst_name = dup_tok(n->kids[0]->tok);
+		char *src_name = dup_tok(n->kids[1]->tok);
+		rval *dst = class_ensure(dst_name);
+		rval *src = class_ensure(src_name);
+		if (n->tok) {                       /* single: copy one named method */
+			char *dm = dup_tok(n->tok);
+			char *sm = dup_tok(n->kids[2]->tok);
+			rval *m = class_method(src, sm);
+			if (!m)
+				return (rval *)fb_error(g_active, "method %s.%s = %s.%s: %s has no method '%s'",
+					dst_name, dm, src_name, sm, src_name, sm);
+			class_add_method(dst, dm, m);
+		} else {                            /* wildcard: copy every method src has now */
+			for (size_t i = 0; i < src->n; i++)
+				class_add_method(dst, src->keys[i], src->items[i]);
+		}
 		return &RV_UNIT;
 	}
 

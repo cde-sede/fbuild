@@ -698,6 +698,7 @@ const char *ast_name[] = {
 	[AST_MORPHISM]="morphism",
 	[AST_OBJNEW]="objnew",
 	[AST_METHODDEF]="methoddef",
+	[AST_METHODCOPY]="methodcopy",
 	[AST_CALL]="call",
 	[AST_FIELD]="field",
 	[AST_CONSTRUCT]="construct",
@@ -856,7 +857,7 @@ static ast *parse_atom(void) {
 	case TOK_STRING:{ ast *n = node(AST_STRING); n->tok = t; tok_advance(); return n; }
 	case TOK_PATH:  { ast *n = node(AST_PATH);   n->tok = t; tok_advance(); return n; }
 
-	case TOK_LBRACE: {                   /* map literal: { key: val, ... } */
+	case TOK_LBRACE: {                   /* map literal: { key: val, ...spread, shorthand } */
 		ast *n = node(AST_MAPLIT);
 		tok_advance();                   /* "{" */
 		skip_nl();
@@ -864,9 +865,31 @@ static ast *parse_atom(void) {
 			do {
 				skip_nl();
 				if (peek(.kind = TOK_RBRACE)) break;   /* trailing comma */
+				if (accept(.kind = TOK_SPLAT)) {
+					/* ...expr: spread a map/object's key-values in (a later
+					 * entry overrides an earlier spread one, same as any
+					 * duplicate key -- map_set is last-wins). */
+					ast *s = node(AST_SPLAT);
+					push(s, parse_expr_no_tuple());
+					push(n, s);
+					skip_nl();
+					continue;
+				}
 				ast *entry = node(AST_TUPLE);
 				ast *key = parse_expr_no_tuple();       /* key */
-				if (key->kind == AST_ID) {
+				int bareword = key->kind == AST_ID;
+				if (bareword && !peek(.kind = TOK_COLON)) {
+					/* shorthand: `{x}` = `{"x": x}` -- key text from the
+					 * identifier, value from an identically-named local. */
+					ast *lit = node(AST_STRING);
+					lit->tok = key->tok;
+					push(entry, lit);
+					push(entry, key);
+					push(n, entry);
+					skip_nl();
+					continue;
+				}
+				if (bareword) {
 					/* a bare word key is always its own literal text -- never a
 					 * variable lookup. An outer binding sharing the word's name
 					 * must not silently turn it into a computed key; write
@@ -1552,19 +1575,68 @@ static ast *parse_expression(void) {
 		return asn;
 	}
 
-	/* method NAME.MNAME = body : attach a method to class NAME. */
+	/* method NAME.MNAME = body : attach a method to class NAME. Also two
+	 * eager, at-this-point-in-the-script method COPY forms (no `super`, no
+	 * live re-binding -- a method added to the source class later doesn't
+	 * retroactively appear on the destination):
+	 *   method NAME.MNAME = OLD.OTHER   -- alias/copy a single method
+	 *   method NAME.*     = OLD.*       -- copy every method OLD has now
+	 * The RHS is only read as OLD.M2/OLD.* -- a bare class/method reference,
+	 * never evaluated as an expression -- when nothing follows it on the
+	 * statement; `OLD.fn(x)` or `OLD.fn + 1` fall through to the ordinary
+	 * lambda-body path like today (and OLD.fn there just doesn't resolve to
+	 * anything special, same as accessing .fn on any other identifier). */
 	if (peek(.kind = TOK_ID, .string = "method")
-	 && _match((struct obj){ .kind = TOK_ID },     cur + 1)
-	 && _match((struct obj){ .kind = TOK_DOT },    cur + 2)
-	 && _match((struct obj){ .kind = TOK_ID },     cur + 3)
+	 && _match((struct obj){ .kind = TOK_ID },  cur + 1)
+	 && _match((struct obj){ .kind = TOK_DOT }, cur + 2)
+	 && (_match((struct obj){ .kind = TOK_ID }, cur + 3)
+	  || _match((struct obj){ .kind = TOK_STAR }, cur + 3))
 	 && _match((struct obj){ .kind = TOK_ASSIGN }, cur + 4)) {
 		tok_advance();                              /* 'method' */
 		token *cname = expect(.kind = TOK_ID);
 		expect(.kind = TOK_DOT);
-		token *mname = expect(.kind = TOK_ID);
+		int dst_wild = peek(.kind = TOK_STAR);
+		token *mname = dst_wild ? (tok_advance(), NULL) : expect(.kind = TOK_ID);
 		skip_nl();
 		expect(.kind = TOK_ASSIGN);
 		skip_nl();
+
+		int copy_shape =
+			_match((struct obj){ .kind = TOK_ID },  cur) &&
+			_match((struct obj){ .kind = TOK_DOT }, cur + 1) &&
+			(_match((struct obj){ .kind = TOK_ID }, cur + 2)
+			 || _match((struct obj){ .kind = TOK_STAR }, cur + 2)) &&
+			(_match((struct obj){ .kind = TOK_NEWLINE }, cur + 3)
+			 || _match((struct obj){ .kind = TOK_EOF }, cur + 3));
+
+		if (dst_wild || copy_shape) {
+			if (!copy_shape)
+				die("method %.*s.* = ... needs a wildcard source (Old.*) at %d:%d",
+				    (int)cname->len, cname->string, cname->start.line, cname->start.col);
+			token *sname = expect(.kind = TOK_ID);
+			expect(.kind = TOK_DOT);
+			int src_wild = peek(.kind = TOK_STAR);
+			token *smname = src_wild ? (tok_advance(), NULL) : expect(.kind = TOK_ID);
+			if (dst_wild != src_wild)
+				die("method %.*s.%s = %.*s.%s: wildcard must be used on both sides at %d:%d",
+				    (int)cname->len, cname->string, dst_wild ? "*" : "MNAME",
+				    (int)sname->len, sname->string, src_wild ? "*" : "MNAME",
+				    cname->start.line, cname->start.col);
+			ast *did = node(AST_ID); did->tok = cname;
+			ast *sid = node(AST_ID); sid->tok = sname;
+			ast *mc = node(AST_METHODCOPY);
+			mc->tok = mname;                        /* NULL for the wildcard form */
+			push(mc, did);
+			push(mc, sid);
+			if (smname) {                           /* NULL for the wildcard form */
+				ast *smid = node(AST_ID);
+				smid->tok = smname;
+				push(mc, smid);
+			}
+			g_no_tuple = save;
+			return mc;
+		}
+
 		ast *cid = node(AST_ID);
 		cid->tok = cname;
 		ast *md = node(AST_METHODDEF);

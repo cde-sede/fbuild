@@ -33,6 +33,7 @@ typedef enum {
 
 	AST_OBJNEW,     /* tok = class name, kids[0] = fields body; tags obj */
 	AST_METHODDEF,  /* tok = method name, kids[0]=class id, kids[1]=body */
+	AST_METHODCOPY, /* method NEW.* = OLD; kids[0]=dest class id, [1]=src id */
 
 	AST_CALL,       /* kids[0]=callee, kids[1..]=args              */
 	AST_FIELD,      /* tok = field id/int, kids[0]=base;            */

@@ -38,6 +38,7 @@ char *AST_NODE_NAMES[] = {
 
 	[AST_OBJNEW] = "AST_OBJNEW",
 	[AST_METHODDEF] = "AST_METHODDEF",
+	[AST_METHODCOPY] = "AST_METHODCOPY",
 	[AST_CALL] = "AST_CALL",
 	[AST_FIELD] = "AST_FIELD",
 	[AST_CONSTRUCT] = "AST_CONSTRUCT",
@@ -694,6 +695,10 @@ static obj_type *infer(ast *node, scope *sc) {
 		infer(node->kids[1], sc);   /* the lambda; kids[0] is the class name id, */
 		t = t_new(RET_NONE);        /* not a variable, so don't infer it         */
 		break;
+
+	case AST_METHODCOPY:            /* method New.m = Old.m2 / New.* = Old.*   */
+		t = t_new(RET_NONE);        /* kids are class/method name ids, not     */
+		break;                      /* variables -- nothing to infer           */
 
 	case AST_COMPARE: {
 		obj_type *l = infer(node->kids[0], sc);
