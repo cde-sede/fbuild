@@ -175,6 +175,31 @@ typedef struct { char *text; fb_Span span; } fb_HoverInfo;
  * obj_type_sprint). Returns 0 if no node covers that position. */
 int fb_hover_at(ast *prog, int line, int col, fb_HoverInfo *out);
 
+/* ---- completion (walk.c) -------------------------------------------------
+ * v1: bare-identifier completion only, no dot-triggered field/method
+ * completion (the parser has no error recovery, so "obj." doesn't parse). */
+
+typedef enum {
+	FB_COMP_BUILTIN     = 0,
+	FB_COMP_TOPLEVEL_FN  = 1,   /* top-level def/method whose RHS is a lambda */
+	FB_COMP_TOPLEVEL_VAR = 2,   /* top-level def whose RHS is a plain value   */
+	FB_COMP_LOCAL        = 3,   /* lambda param / where-binding in scope      */
+} fb_CompKind;
+typedef struct {
+	const char *name;    /* NUL-terminated, arena-owned */
+	fb_CompKind kind;
+	const char *detail;  /* signature/type string, or NULL if none available */
+} fb_CompItem;
+
+/* Candidates for a bare-identifier position (line, col), 1-based: every
+ * known builtin, every top-level def/method name, and (if a scope can be
+ * located at line/col) every local in scope there. No prefix filtering --
+ * caller/client filters against what's already typed. Writes at most
+ * max_out entries into out, returns the count written. `prog` may be NULL
+ * (last parse was a syntax error) -- still returns builtins; the
+ * top-level/local tiers just contribute nothing. */
+int fb_complete_at(ast *prog, int line, int col, fb_CompItem *out, int max_out);
+
 /* executor (run.c). argc/argv are the program's CLI args; args[2..] become
  * the language-level `args` list. */
 void      run_program(ast *prog, int argc, char **argv);

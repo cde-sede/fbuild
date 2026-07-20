@@ -176,6 +176,12 @@ typedef int (*fb_open_fn)(fb_State *S);
 void          fb_register(fb_State *S, const fb_Reg *reg);
 const fb_Reg *fb_reg_find(const char *name);              /* NUL-terminated */
 const fb_Reg *fb_reg_findn(const char *name, size_t len); /* slice-friendly */
+/* Enumerate every currently-registered builtin (core + host + plugin) on S,
+ * in registration order. Reflects whatever's been fb_register'd so far
+ * (e.g. after loading workspace plugins), same as fb_reg_find/fb_reg_findn.
+ * fb_reg_at returns NULL if i is out of range. */
+int           fb_reg_count(fb_State *S);
+const fb_Reg *fb_reg_at   (fb_State *S, int i);
 
 /* ---- value constructors ----------------------------------------------- */
 fb_Value fb_nil (fb_State *S);

@@ -603,6 +603,52 @@ static obj_type *core_generic_signature(token *name) {
 	return NULL;
 }
 
+/* Best available functor signature for builtin NAME, or NULL if NAME is
+ * neither curated (core_generic_signature) nor known-arity (g_core_arity /
+ * the fb_reg registry) -- i.e. genuinely unknown. `result_type` is the
+ * return type to use when only arity is known (a real call site's own
+ * inferred result, or NULL when there's no call to specialize from, e.g.
+ * bare-name completion/hover with no arguments -- falls back to RET_VAR).
+ * Order of preference: curated structural signature > registry/table
+ * arity-shaped functor > NULL. Shared by infer_call's callee-annotation
+ * wrapper and completion's builtin tier, so both stay in sync. */
+static obj_type *builtin_signature(token *name, obj_type *result_type) {
+	obj_type *generic = core_generic_signature(name);
+	if (generic) return generic;
+
+	int mn = -1, mx = -1;
+	for (size_t i = 0; i < N_CORE_ARITY; i++)
+		if (tok_is(name, g_core_arity[i].name)) {
+			mn = g_core_arity[i].min; mx = g_core_arity[i].max;
+			break;
+		}
+	if (mn < 0) {
+		const fb_Reg *rg = fb_reg_findn(name->string, name->len);
+		if (rg) { mn = rg->min; mx = rg->max; }
+	}
+	if (mn < 0) return NULL;
+
+	obj_type *param;
+	if (mx < 0) {
+		/* variadic (max<0): `mn` fixed "?" slots (none if mn==0) followed by
+		 * a trailing "*?" absorbing the rest -- same "*" a capture param's
+		 * own generic slot uses (infer_param_type_from_usage), since this is
+		 * the same shape: zero or more of an unknown type. */
+		if (mn == 0) {
+			param = t_variadic(t_new(RET_VAR));
+		} else {
+			obj_type **k = a_alloc(((size_t)mn + 1) * sizeof *k);
+			for (int j = 0; j < mn; j++) k[j] = t_new(RET_VAR);
+			k[mn] = t_variadic(t_new(RET_VAR));
+			param = t_compound(RET_TUPLE, (size_t)mn + 1, k);
+		}
+	} else {
+		size_t n = (size_t)mx;
+		param = n <= 1 ? t_new(RET_VAR) : tuple_of_n_var(n);
+	}
+	return t_functor(param, result_type ? result_type : t_new(RET_VAR));
+}
+
 static obj_type *infer_call_impl(ast *node, scope *sc) {
 	ast *callee = node->kids[0];
 
@@ -845,49 +891,8 @@ static obj_type *infer_call(ast *node, scope *sc) {
 	 * falls through infer_id to the generic "user function value" path,
 	 * which sets callee->type to a bare RET_VAR -- worth upgrading too. */
 	if (callee->kind == AST_ID && (!callee->type || callee->type->ret == RET_VAR)) {
-		obj_type *generic = core_generic_signature(callee->tok);
-		if (generic) {
-			/* a curated signature is a complete, self-consistent generic
-			 * description on its own (e.g. filter's List<a> result already
-			 * shares "a" with its List<a> param) -- use it as-is rather than
-			 * grafting on `result`, which without a real call site is just
-			 * whatever the plain dispatch above defaulted to, strictly less
-			 * informative than the curated shape. */
-			callee->type = generic;
-		} else {
-			int mn = -1, mx = -1;
-			for (size_t i = 0; i < N_CORE_ARITY; i++)
-				if (tok_is(callee->tok, g_core_arity[i].name)) {
-					mn = g_core_arity[i].min; mx = g_core_arity[i].max;
-					break;
-				}
-			if (mn < 0) {
-				const fb_Reg *rg = fb_reg_findn(callee->tok->string, callee->tok->len);
-				if (rg) { mn = rg->min; mx = rg->max; }
-			}
-			if (mn >= 0) {
-				obj_type *param;
-				if (mx < 0) {
-					/* variadic (max<0): `mn` fixed "?" slots (none if
-					 * mn==0) followed by a trailing "*?" absorbing the
-					 * rest -- same "*" a capture param's own generic slot
-					 * uses (infer_param_type_from_usage), since this is
-					 * the same shape: zero or more of an unknown type. */
-					if (mn == 0) {
-						param = t_variadic(t_new(RET_VAR));
-					} else {
-						obj_type **k = a_alloc(((size_t)mn + 1) * sizeof *k);
-						for (int j = 0; j < mn; j++) k[j] = t_new(RET_VAR);
-						k[mn] = t_variadic(t_new(RET_VAR));
-						param = t_compound(RET_TUPLE, (size_t)mn + 1, k);
-					}
-				} else {
-					size_t n = (size_t)mx;
-					param = n <= 1 ? t_new(RET_VAR) : tuple_of_n_var(n);
-				}
-				callee->type = t_functor(param, result);
-			}
-		}
+		obj_type *sig = builtin_signature(callee->tok, result);
+		if (sig) callee->type = sig;
 	}
 	return result;
 }
@@ -1767,6 +1772,23 @@ static tbind *scope_find(scope *s, token *name) {
 	return NULL;
 }
 
+/* Every binding visible at scope `s` (all frames, walking ->parent), most
+ * inner first, each name appearing once (an outer frame's binding of the
+ * same name is shadowed and skipped). For completion, which needs the full
+ * local-variable list rather than one name's lookup. Writes at most
+ * max_out entries into out; returns the count written. */
+static int scope_collect(scope *s, tbind **out, int max_out) {
+	int n = 0;
+	for (; s && n < max_out; s = s->parent)
+		for (tbind *b = s->binds; b && n < max_out; b = b->next) {
+			int shadowed = 0;
+			for (int i = 0; i < n; i++)
+				if (tok_eq(out[i]->name, b->name)) { shadowed = 1; break; }
+			if (!shadowed) out[n++] = b;
+		}
+	return n;
+}
+
 /* Recurse from `n` down to `target`, threading the same scope-introducing
  * rules infer() uses (AST_LAMBDA binds params, AST_GUARD's `where` binds),
  * and return the scope in effect at `target`. Unlike infer(), the scope
@@ -2021,4 +2043,74 @@ int fb_hover_at(ast *prog, int line, int col, fb_HoverInfo *out) {
 	}
 	out->text = obj_type_sprint(n->type);
 	return 1;
+}
+
+int fb_complete_at(ast *prog, int line, int col, fb_CompItem *out, int max_out) {
+	if (!out || max_out <= 0) return 0;
+	int n = 0;
+
+	/* 1. builtins: core table first, then anything registered (host/plugin)
+	 * not already covered by the core table. */
+	for (size_t i = 0; i < N_CORE_ARITY && n < max_out; i++) {
+		token tmp = {0};
+		tmp.string = (char *)g_core_arity[i].name;
+		tmp.len = strlen(g_core_arity[i].name);
+		obj_type *sig = builtin_signature(&tmp, NULL);
+		out[n].name = g_core_arity[i].name;
+		out[n].kind = FB_COMP_BUILTIN;
+		out[n].detail = sig ? obj_type_sprint(sig) : NULL;
+		n++;
+	}
+	for (int i = 0; i < fb_reg_count(NULL) && n < max_out; i++) {
+		const fb_Reg *rg = fb_reg_at(NULL, i);
+		int dup = 0;
+		for (size_t j = 0; j < N_CORE_ARITY; j++)
+			if (!strcmp(rg->name, g_core_arity[j].name)) { dup = 1; break; }
+		if (dup) continue;
+		out[n].name = rg->name;
+		out[n].kind = FB_COMP_BUILTIN;
+		out[n].detail = rg->doc;
+		n++;
+	}
+
+	/* 2. top-level defs/methods */
+	if (prog) {
+		collect_symbols(prog);
+		for (int i = 0; i < g_ndefsyms && n < max_out; i++) {
+			ast *rhs = g_defsyms[i].site->kids[0];
+			out[n].name = tok_str(g_defsyms[i].name);
+			out[n].kind = (rhs && rhs->kind == AST_LAMBDA)
+			            ? FB_COMP_TOPLEVEL_FN : FB_COMP_TOPLEVEL_VAR;
+			out[n].detail = g_defsyms[i].site->type
+			              ? obj_type_sprint(g_defsyms[i].site->type) : NULL;
+			n++;
+		}
+		for (int i = 0; i < g_nmethodsyms && n < max_out; i++) {
+			out[n].name = tok_str(g_methodsyms[i].method_name);
+			out[n].kind = FB_COMP_TOPLEVEL_FN;
+			out[n].detail = NULL;
+			n++;
+		}
+	}
+
+	/* 3. locals in scope at (line, col) -- omitted if the cursor isn't over
+	 * any node (a gap) or prog is NULL (last check was a syntax error). */
+	if (prog) {
+		ast *cursor = find_node(prog, line, col);
+		if (cursor) {
+			scope *sc = locate_scope(prog, cursor, NULL);
+			if (sc) {
+				tbind *binds[256];
+				int nb = scope_collect(sc, binds, 256);
+				for (int i = 0; i < nb && n < max_out; i++) {
+					out[n].name = tok_str(binds[i]->name);
+					out[n].kind = FB_COMP_LOCAL;
+					out[n].detail = binds[i]->type ? obj_type_sprint(binds[i]->type) : NULL;
+					n++;
+				}
+			}
+		}
+	}
+
+	return n;
 }

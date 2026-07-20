@@ -792,6 +792,11 @@ const fb_Reg *fb_reg_findn(const char *name, size_t len) {
 const fb_Reg *fb_reg_find(const char *name) {
 	return fb_reg_findn(name, strlen(name));
 }
+int fb_reg_count(fb_State *S) { (void)S; return g_nreg; }
+const fb_Reg *fb_reg_at(fb_State *S, int i) {
+	(void)S;
+	return (i >= 0 && i < g_nreg) ? &g_regs[i] : NULL;
+}
 static const fb_Reg *fb_reg_find_tok(token *t) {
 	return t ? fb_reg_findn(t->string, t->len) : NULL;
 }

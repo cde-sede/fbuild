@@ -5,8 +5,10 @@
  * go-to-definition requests from the real parser/type-checker -- not a
  * separate hand-maintained grammar.
  *
- * v1 scope: textDocument/{didOpen,didChange,didClose,hover,definition},
- * publishDiagnostics. No completion yet.
+ * v1 scope: textDocument/{didOpen,didChange,didClose,hover,definition,
+ * completion}, publishDiagnostics. Completion is bare-identifier only (no
+ * dot-triggered field/method completion -- the parser has no error
+ * recovery, so "obj." doesn't parse).
  *
  * Nothing but framed JSON-RPC messages may go to stdout; anything else
  * (errors, notices) goes to stderr. */
@@ -452,7 +454,8 @@ static void handle_initialize(jval *id, jval *params) {
 	}
 	send_result(id,
 		"{\"capabilities\":{\"textDocumentSync\":1,"
-		"\"hoverProvider\":true,\"definitionProvider\":true}}");
+		"\"hoverProvider\":true,\"definitionProvider\":true,"
+		"\"completionProvider\":{}}}");
 }
 
 static void handle_did_open(jval *params) {
@@ -541,6 +544,40 @@ static void handle_definition(jval *id, jval *params) {
 	free(b.buf);
 }
 
+static void handle_completion(jval *id, jval *params) {
+	jval *td = jget(params, "textDocument");
+	jval *pos = jget(params, "position");
+	const char *uri = jstr(jget(td, "uri"));
+	int line = jint(jget(pos, "line"), 0) + 1;
+	int col  = jint(jget(pos, "character"), 0) + 1;
+	fb_Doc *d = uri ? doc_find(uri) : NULL;
+	if (!d) { send_result(id, "[]"); return; }
+
+	static fb_CompItem items[512];
+	/* d->prog may be NULL (last check was a syntax error) -- fb_complete_at
+	 * degrades gracefully, still returning the builtin tier. */
+	int n = fb_complete_at(d->prog, line, col, items, 512);
+
+	dbuf b; dbuf_init(&b);
+	dbuf_puts(&b, "[");
+	for (int i = 0; i < n; i++) {
+		if (i) dbuf_puts(&b, ",");
+		/* LSP CompletionItemKind: 3 = Function, 6 = Variable */
+		int kind = (items[i].kind == FB_COMP_BUILTIN || items[i].kind == FB_COMP_TOPLEVEL_FN) ? 3 : 6;
+		dbuf_puts(&b, "{\"label\":");
+		dbuf_putjstr(&b, items[i].name);
+		dbuf_putf(&b, ",\"kind\":%d", kind);
+		if (items[i].detail) {
+			dbuf_puts(&b, ",\"detail\":");
+			dbuf_putjstr(&b, items[i].detail);
+		}
+		dbuf_puts(&b, "}");
+	}
+	dbuf_puts(&b, "]");
+	send_result(id, b.buf);
+	free(b.buf);
+}
+
 static void handle_shutdown(jval *id) {
 	for (int i = 0; i < g_ndocs; i++)
 		if (g_docs[i].S) fb_close(g_docs[i].S);
@@ -567,6 +604,7 @@ static void handle_message(const char *body, size_t len) {
 	else if (!strcmp(method, "textDocument/didClose"))    handle_did_close(params);
 	else if (!strcmp(method, "textDocument/hover"))       handle_hover(id, params);
 	else if (!strcmp(method, "textDocument/definition"))  handle_definition(id, params);
+	else if (!strcmp(method, "textDocument/completion"))  handle_completion(id, params);
 	else if (!strcmp(method, "shutdown"))                 handle_shutdown(id);
 	else if (!strcmp(method, "exit")) {
 		jfree(msg);
