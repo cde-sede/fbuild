@@ -360,21 +360,21 @@ int fbuild_abi(void) { return FBUILD_ABI; }
 
 int fbuild_open(fb_State *S) {
 	static const fb_Reg regs[] = {
-		{ "stalem",     bi_stalem,     1, -1, FB_RET_BOOL, 0 },
-		{ "mtimem",     bi_mtimem,     1,  1, FB_RET_INT,  0 },
-		{ "newest",     bi_newest,     1, -1, FB_RET_FILE, 0 },
-		{ "oldest",     bi_oldest,     1, -1, FB_RET_FILE, 0 },
-		{ "existsm",    bi_existsm,    1,  1, FB_RET_BOOL, 0 },
-		{ "is_filem",   bi_is_filem,   1,  1, FB_RET_BOOL, 0 },
-		{ "is_dirm",    bi_is_dirm,    1,  1, FB_RET_BOOL, 0 },
-		{ "globm",      bi_globm,      1,  1, FB_RET_LIST, 0 },
-		{ "needed",     bi_needed,     1, -1, FB_RET_LIST, 0 },
-		{ "depsm",      bi_depsm,      1,  1, FB_RET_LIST, 0 },
-		{ "hashm",      bi_hashm,      1,  1, FB_RET_INT,  0 },
-		{ "stale_hash", bi_stale_hash, 1, -1, FB_RET_BOOL, 0 },
-		{ "cache_load", bi_cache_load, 1,  1, FB_RET_BOOL, 0 },
-		{ "cache_save", bi_cache_save, 1,  1, FB_RET_BOOL, 0 },
-		{ "stat_reset", bi_stat_reset, 0,  0, FB_RET_BOOL, 0 },
+		{ "stalem", bi_stalem, 1, -1, FB_RET_BOOL, 0, NULL },
+		{ "mtimem", bi_mtimem, 1, 1, FB_RET_INT, 0, NULL },
+		{ "newest", bi_newest, 1, -1, FB_RET_FILE, 0, NULL },
+		{ "oldest", bi_oldest, 1, -1, FB_RET_FILE, 0, NULL },
+		{ "existsm", bi_existsm, 1, 1, FB_RET_BOOL, 0, NULL },
+		{ "is_filem", bi_is_filem, 1, 1, FB_RET_BOOL, 0, NULL },
+		{ "is_dirm", bi_is_dirm, 1, 1, FB_RET_BOOL, 0, NULL },
+		{ "globm", bi_globm, 1, 1, FB_RET_LIST, 0, NULL },
+		{ "needed", bi_needed, 1, -1, FB_RET_LIST, 0, NULL },
+		{ "depsm", bi_depsm, 1, 1, FB_RET_LIST, 0, NULL },
+		{ "hashm", bi_hashm, 1, 1, FB_RET_INT, 0, NULL },
+		{ "stale_hash", bi_stale_hash, 1, -1, FB_RET_BOOL, 0, NULL },
+		{ "cache_load", bi_cache_load, 1, 1, FB_RET_BOOL, 0, NULL },
+		{ "cache_save", bi_cache_save, 1, 1, FB_RET_BOOL, 0, NULL },
+		{ "stat_reset", bi_stat_reset, 0, 0, FB_RET_BOOL, 0, NULL },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);

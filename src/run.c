@@ -18,7 +18,7 @@
 /* This TU owns the single static build_info (.my_metadata) that
  * fbuild_version() reads back, so it defines METADATA_LIST before the header
  * pulls in build.h. */
-#define FBUILD_VERSION "0.2.6"
+#define FBUILD_VERSION "0.3.0"
 #define _version FBUILD_VERSION
 #define METADATA_LIST(X) X(version, FBUILD_VERSION)
 
@@ -658,6 +658,14 @@ static void bind_params(renv *e, ast *params, rval *arg) {
 				env_put(e, p->kids[0]->tok, rest);
 			}
 			break;
+		case AST_TUPLE:
+			/* (a, b): destructure this one positional argument by field name
+			 * (map or object), same lookup as method self-destructuring. */
+			for (size_t j = 0; j < p->nkids; j++) {
+				ast *sub = p->kids[j];
+				if (sub->tok) env_put(e, sub->tok, map_get(pt, dup_tok(sub->tok)));
+			}
+			break;
 		default:
 			break;
 		}
@@ -696,12 +704,14 @@ struct fb_State {
 	jmp_buf   err_jmp;      /* protected-call boundary                     */
 	int       err_set;      /* 1 when a boundary is installed              */
 	char      err_msg[512];
+	int       err_line, err_col;   /* position for the current err_msg, if any (0 = unknown) */
 	int       argc;         /* args handed to the script (fb_set_args)     */
 	char    **argv;
 	void     *arena;        /* this interpreter's durable arena (g_main)   */
 	void     *scratch;      /* per-iteration scratch arena (reclaimed)     */
 	fb_globals snap;        /* globals held while this state is inactive   */
 	const char *plugins[FB_MAX_PLUGINS]; int nplugins; /* fb_load_plugin() log */
+	int       env_plugins_done;   /* fb_load_env_plugins() ran for this state */
 };
 struct fb_State *g_active;   /* the interpreter whose globals are live */
 static void fb_activate(struct fb_State *S);   /* make S's globals live */
@@ -893,14 +903,33 @@ fb_Value fb_apply(fb_State *S, fb_Value fn, fb_Value *args, int nargs) {
 	return (fb_Value)apply((rval*)fn, arg);
 }
 
-fb_Value fb_error(fb_State *S, const char *fmt, ...) {
+static fb_Value fb_error_vat(fb_State *S, int line, int col, const char *fmt, va_list ap) {
 	if (!S) S = g_active;
-	va_list ap; va_start(ap, fmt);
 	vsnprintf(S->err_msg, sizeof S->err_msg, fmt, ap);
-	va_end(ap);
+	S->err_line = line; S->err_col = col;
 	if (S->err_set) longjmp(S->err_jmp, 1);   /* embedding: unwind to boundary */
 	fprintf(stderr, "error: %s\n", S->err_msg);
 	exit(1);                                   /* CLI: no boundary installed  */
+}
+
+fb_Value fb_error(fb_State *S, const char *fmt, ...) {
+	va_list ap; va_start(ap, fmt);
+	fb_Value r = fb_error_vat(S, 0, 0, fmt, ap);
+	va_end(ap);
+	return r;
+}
+
+fb_Value fb_error_at(fb_State *S, int line, int col, const char *fmt, ...) {
+	va_list ap; va_start(ap, fmt);
+	fb_Value r = fb_error_vat(S, line, col, fmt, ap);
+	va_end(ap);
+	return r;
+}
+
+void fb_error_pos(fb_State *S, int *line, int *col) {
+	if (!S) S = g_active;
+	if (line) *line = S->err_line;
+	if (col)  *col  = S->err_col;
 }
 
 /* Dispatch a registered builtin: enforce arity, then call. Args are already
@@ -1301,8 +1330,6 @@ rval *eval(ast *n, renv *e) {
 		if (b) return b;
 		rval *d = def_lookup(n->tok);
 		if (d) return d;
-		if (tok_is(n->tok, "_GLOBALS")) return store_globals();
-		if (tok_is(n->tok, "_SHARED"))  return store_shared();
 		rval *bv = fb_bind_lookup(n->tok);   /* plugin global (fb_global_bind) */
 		if (bv) return bv;
 		char *nm = dup_tok(n->tok);
@@ -1749,11 +1776,17 @@ void run_program(ast *prog, int argc, char **argv) {
 	getcwd(g_cwd->s, 1024);
 
 	/* publish for bare-identifier lookup (fb_bind_lookup, checked in AST_ID
-	 * eval) the same way a plugin exposes a namespace object -- `args`/`cwd`
-	 * are core state, not CLI-only, so the bind happens here rather than in
-	 * main.c (see fb_open_base for their FB_GLOBAL registration). */
+	 * eval) the same way a plugin exposes a namespace object -- `args`/`cwd`/
+	 * `_GLOBALS`/`_SHARED` are core state, not CLI-only, so the bind happens
+	 * here rather than in main.c (see fb_open_base for their FB_GLOBAL
+	 * registration). store_globals()/store_shared() lazily create their map
+	 * on first call, so binding here (before any script code runs) forces
+	 * that creation up front; later map_set mutations are in-place so the
+	 * bound reference stays live. */
 	fb_global_bind(g_active, "args", (fb_Value)g_args);
 	fb_global_bind(g_active, "cwd", (fb_Value)g_cwd);
+	fb_global_bind(g_active, "_GLOBALS", (fb_Value)store_globals());
+	fb_global_bind(g_active, "_SHARED", (fb_Value)store_shared());
 
 	g_ndefs = 0;
 	for (size_t i = 0; i < prog->nkids; i++) {
@@ -1852,14 +1885,17 @@ int fb_dostring(fb_State *S, const char *src, const char *chunkname) {
 	S->err_msg[0] = '\0';
 	fb_init();
 	if (fb_load_env_plugins(S)) return 1;   /* $FBUILD_PLUGINS, before check */
+
+	/* Boundary installed before lex/parse: die()/_expect() (routed through
+	 * fb_error/fb_error_at) unwind here too, not just runtime errors -- a
+	 * malformed script no longer kills a long-lived host. */
+	if (setjmp(S->err_jmp)) { S->err_set = 0; return 1; }
+	S->err_set = 1;
+
 	p = a_alloc(sizeof *p + sizeof(token) * MAX_TOKENS);
 	lex(a_dup(src));                 /* lexer wants a writable, arena-owned buf */
 	ast *prog = parse_program();
 	if (getenv("DUMP_AST")) ast_print(prog, 0);
-
-	/* runtime fb_error() unwinds here (parse-time die() still exits: S1 limit). */
-	if (setjmp(S->err_jmp)) { S->err_set = 0; return 1; }
-	S->err_set = 1;
 
 	int errs = infer_program(prog);
 	if (errs) {
@@ -1871,6 +1907,47 @@ int fb_dostring(fb_State *S, const char *src, const char *chunkname) {
 	run_program(prog, S->argc, S->argv);
 	S->err_set = 0;
 	return 0;
+}
+
+/* Parse + type-check only -- never calls run_program(). See fbuild.h. */
+int fb_check(fb_State *S, const char *src, const char *chunkname,
+             fb_Diag *diags, int max_diags, ast **out_prog) {
+	(void)chunkname;
+	fb_activate(S);
+	S->err_msg[0] = '\0';
+	fb_init();
+	if (out_prog) *out_prog = NULL;
+	if (fb_load_env_plugins(S)) {
+		if (diags && max_diags > 0) {
+			diags[0] = (fb_Diag){0};
+			diags[0].severity = FB_SEV_ERROR;
+			snprintf(diags[0].message, sizeof diags[0].message, "%.*s", (int)sizeof diags[0].message - 1, S->err_msg);
+		}
+		return 1;
+	}
+
+	if (setjmp(S->err_jmp)) {
+		S->err_set = 0;
+		if (diags && max_diags > 0) {
+			diags[0] = (fb_Diag){0};
+			diags[0].line = diags[0].end_line = S->err_line;
+			diags[0].col  = diags[0].end_col  = S->err_col;
+			diags[0].severity = FB_SEV_ERROR;
+			snprintf(diags[0].message, sizeof diags[0].message, "%.*s", (int)sizeof diags[0].message - 1, S->err_msg);
+		}
+		return 1;
+	}
+	S->err_set = 1;
+
+	p = a_alloc(sizeof *p + sizeof(token) * MAX_TOKENS);
+	lex(a_dup(src));                 /* lexer wants a writable, arena-owned buf */
+	ast *prog = parse_program();
+	if (getenv("DUMP_AST")) ast_print(prog, 0);
+
+	int errs = infer_program_collect(prog, diags, max_diags);
+	S->err_set = 0;
+	if (out_prog) *out_prog = prog;
+	return errs;
 }
 
 int fb_dofile(fb_State *S, const char *path) {
@@ -1967,9 +2044,8 @@ static int fb_load_dir_plugins(fb_State *S, const char *dir) {
 /* Load colon-separated plugin paths from $FBUILD_PLUGINS, then every *.so
  * under colon-separated directories in $FBUILD_PLUGIN_PATH (once, in that order). */
 int fb_load_env_plugins(fb_State *S) {
-	static int done = 0;
-	if (done) return 0;
-	done = 1;
+	if (S->env_plugins_done) return 0;
+	S->env_plugins_done = 1;
 	const char *env = getenv("FBUILD_PLUGINS");
 	if (env && *env) {
 		char *list = a_dup(env), *save = NULL;

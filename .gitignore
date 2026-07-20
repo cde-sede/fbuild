@@ -23,3 +23,4 @@ graphical/
 tree-sitter-funcbuild/funcbuild.so
 tree-sitter-funcbuild/src/
 tree-sitter-funcbuild/node_modules/
+/fbuildd

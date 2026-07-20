@@ -6,13 +6,27 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <sys/syscall.h>
+#include <stdarg.h>
 
 #include "cparser.h"
 #include "ast.h"
 #include "fbuild.h"
 #include "graph.h"
 
-#define die(message, ...) do { fprintf(stderr, "error:" message, ##__VA_ARGS__); exit(1); } while (0)
+/* Lexer/parser fatal error, made recoverable: under an embedding's protected
+ * boundary this unwinds there (fb_error) instead of killing the process, so a
+ * long-lived host (e.g. an LSP daemon) survives a syntactically broken parse.
+ * No structured position here -- most call sites already embed "at %d:%d" in
+ * the message text itself; fb_error_at (used by _expect, parser.c) is the
+ * source of structured positions for the common "unexpected token" case. */
+static void fb_parse_die(const char *fmt, ...) {
+	char buf[512];
+	va_list ap; va_start(ap, fmt);
+	vsnprintf(buf, sizeof buf, fmt, ap);
+	va_end(ap);
+	fb_error(NULL, "%s", buf);
+}
+#define die(message, ...) fb_parse_die(message, ##__VA_ARGS__)
 
 void lex(char *s)
 {
@@ -1440,6 +1454,7 @@ static ast *parse_sequence(void) {
  * lambda parameter separator) -- so only a single-parameter lambda matches. */
 static int lambda_ahead(int multi) {
 	size_t i = cur;
+	int first_iter = 1;
 #define LA_SKIPNL() while (i < p->pos && p->tokens[i].kind == TOK_NEWLINE) i++
 	for (;;) {
 		LA_SKIPNL();
@@ -1447,7 +1462,35 @@ static int lambda_ahead(int multi) {
 		if (!t)
 			return 0;
 
-		if (t->kind == TOK_AT) {                 /* "@" / "@" id */
+		/* "(" id ("," id)* ")": a nested destructure-pattern param, e.g. any
+		 * slot of `(x, y), args -> ...` or `a, (x, y) -> ...`. Only rejected
+		 * (falls through to the primary parser) when it's the SOLE element --
+		 * "(x, y) -> body" alone, with nothing else before "->", is the
+		 * existing whole-list-wrap shape (flattens to two top-level params),
+		 * and must keep meaning that for backward compatibility. Once a comma
+		 * has been crossed we're unambiguously in multi-slot territory, so a
+		 * paren-group there (even trailing, right before "->") is a pattern. */
+		int was_paren = 0;
+		if (t->kind == TOK_LPAREN) {
+			was_paren = 1;
+			i++; LA_SKIPNL();
+			if (i >= p->pos || p->tokens[i].kind != TOK_ID)
+				return 0;
+			i++;
+			for (;;) {
+				LA_SKIPNL();
+				if (!(i < p->pos && p->tokens[i].kind == TOK_COMMA))
+					break;
+				i++; LA_SKIPNL();
+				if (i >= p->pos || p->tokens[i].kind != TOK_ID)
+					return 0;
+				i++;
+			}
+			LA_SKIPNL();
+			if (i >= p->pos || p->tokens[i].kind != TOK_RPAREN)
+				return 0;
+			i++;
+		} else if (t->kind == TOK_AT) {          /* "@" / "@" id */
 			i++; LA_SKIPNL();
 			if (i < p->pos && p->tokens[i].kind == TOK_ID)
 				i++;
@@ -1467,9 +1510,10 @@ static int lambda_ahead(int multi) {
 		if (!a)
 			return 0;
 		if (a->kind == TOK_ARROW)
-			return 1;
+			return (was_paren && first_iter) ? 0 : 1;
 		if (a->kind == TOK_COMMA && multi) {
 			i++;
+			first_iter = 0;
 			continue;
 		}
 		return 0;
@@ -1477,9 +1521,27 @@ static int lambda_ahead(int multi) {
 #undef LA_SKIPNL
 }
 
-/* parameter: identifier / projection / capture */
+/* parameter: identifier / projection / capture / destructure pattern */
 static ast *parse_parameter(void) {
 	token *t = tok_cur();
+	if (t->kind == TOK_LPAREN) {             /* (a, b): destructure this one
+	                                           * positional argument by field
+	                                           * name (map or object), like
+	                                           * method self-destructuring but
+	                                           * scoped to a single param slot */
+		tok_advance();
+		ast *pat = node(AST_TUPLE);
+		do {
+			skip_nl();
+			ast *id = node(AST_ID);
+			id->tok = expect(.kind = TOK_ID);
+			push(pat, id);
+			skip_nl();
+		} while (accept(.kind = TOK_COMMA));
+		skip_nl();
+		expect(.kind = TOK_RPAREN);
+		return pat;
+	}
 	if (t->kind == TOK_AT) {                 /* capture */
 		ast *n = node(AST_CAPTURE);
 		n->tok = t;

@@ -129,7 +129,9 @@ int fbuild_open(fb_State *S) {
 	 * (FB_GLOBAL: a bound value, not a callable); the real value comes from
 	 * fb_global_bind below, which eval() resolves first, so this fn only
 	 * runs if someone calls math(...) directly. */
-	fb_register(S, &(fb_Reg){ "math", m_noncallable, 0, -1, FB_RET_ANY, FB_GLOBAL });
+	fb_register(S, &(fb_Reg){ "math", m_noncallable, 0, -1, FB_RET_ANY, FB_GLOBAL,
+	            "math namespace (fbmath): abs, sign, min, max, pow, sqrt, floor, "
+	            "ceil, round; math.pi, math.e" });
 	fb_global_bind(S, "math", obj);
 	return 0;
 }

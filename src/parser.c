@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "cparser.h"
+#include "fbuild.h"
 
 /* arena declarations only (implementation lives in run.c via BUILD_IMPLEMENTATION) */
 #include "cds_lib/build.h"
@@ -144,16 +145,20 @@ int _accept(struct obj want) {
 	return 1;
 }
 
-/* consume + return matched token, or die */
+/* consume + return matched token, or raise a recoverable parse error */
 token *_expect(struct obj want) {
 	if (!_match(want, cur)) {
 		token *t = cur < p->pos ? &p->tokens[cur] : NULL;
-		fprintf(stderr, "parse error at token %zu: expected", cur);
-		if (want.kind != NONE) fprintf(stderr, " kind %s", kind_name[want.kind]);
-		if (want.string)       fprintf(stderr, " \"%s\"", want.string);
-		if (t) fprintf(stderr, ", got \"%.*s\"\n", (int)t->len, t->string);
-		else   fprintf(stderr, ", got <EOF>\n");
-		exit(1);
+		int line = 0, col = 0;
+		if (t) { line = t->start.line; col = t->start.col; }
+		else if (p->pos > 0) { line = p->tokens[p->pos-1].end.line; col = p->tokens[p->pos-1].end.col; }
+		char buf[256]; size_t n = 0;
+		n += snprintf(buf+n, sizeof buf-n, "parse error at %d:%d: expected", line, col);
+		if (want.kind != NONE) n += snprintf(buf+n, sizeof buf-n, " kind %s", kind_name[want.kind]);
+		if (want.string)       n += snprintf(buf+n, sizeof buf-n, " \"%s\"", want.string);
+		if (t) snprintf(buf+n, sizeof buf-n, ", got \"%.*s\"", (int)t->len, t->string);
+		else   snprintf(buf+n, sizeof buf-n, ", got <EOF>");
+		fb_error_at(NULL, line, col, "%s", buf);
 	}
 	return &p->tokens[cur++];
 }

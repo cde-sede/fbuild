@@ -222,14 +222,29 @@ pad_right  : String -> Int -> String? -> String   left-justify,  fill=' '
 center     : String -> Int -> String? -> String   center,        fill=' '
 starts_with: String -> String -> Bool
 ends_with  : String -> String -> Bool
-find       : String -> String -> Int    substring index or -1
+find       : String -> String -> Int? -> Int   substring index at/after `from` (default 0), or -1
+rfind      : String -> String -> Int    last substring index, or -1
+occurrences: String -> String -> Int    count of non-overlapping matches
 repeat     : String -> Int -> String
 chars      : String -> List<String>     split into characters
+words      : String -> List<String>     split on whitespace runs, no empties
+partition  : String -> String -> (String, String, String)   (before, sep, after); sep absent -> (s, "", "")
 substr     : String -> Int -> Int? -> String   [start,end) byte range, neg from end
+is_alpha   : String -> Bool             non-empty and every char a letter
+is_digit   : String -> Bool             non-empty and every char a digit
+is_alnum   : String -> Bool             non-empty and every char alnum
+is_space   : String -> Bool             non-empty and every char whitespace
+is_upper   : String -> Bool             has a cased letter, none lowercase
+is_lower   : String -> Bool             has a cased letter, none uppercase
+ord        : String -> Int              byte value of first char
+chr        : Int -> String              one-byte string for code 0-255
 to_int     : String|Int|Float -> Int      truncates a Float
 to_float   : String|Int|Float -> Float
 to_str     : a -> String
 ```
+
+`find`/`rfind`/`occurrences`/`words`/`partition`/`is_*`/`ord`/`chr` are byte-oriented
+(no UTF-8 decoding), same as the rest of this section — one `char` is one byte.
 
 ## path
 

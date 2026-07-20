@@ -111,7 +111,7 @@ int fbuild_open(fb_State *S) {
 	fb_method(S, STREAM_CLS, "close",      m_close);
 
 	static const fb_Reg regs[] = {
-		{ "stream", bi_stream, 1, 2, FB_RET_ANY, 0 },
+		{ "stream", bi_stream, 1, 2, FB_RET_ANY, 0, NULL },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);

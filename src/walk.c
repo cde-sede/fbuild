@@ -130,6 +130,52 @@ static obj_type *t_file(void) {
 	return f;
 }
 
+/* Parser<schema>(...) result, when `schema` is a literal map (the common
+ * case): a record with one field per schema entry, typed from its
+ * "bool"/"int"/"str" spec (the "type"-only bareword form, or the explicit
+ * { "type": ..., ... } form -- see SKILLS.md "cli args"), plus "rest"
+ * (leftover positionals, always present). NULL if schema isn't a literal
+ * (e.g. `Parser<some_var>`) -- stays RET_VAR/"?" in that case, same as
+ * before this existed; there's nothing to statically read a shape from. */
+static token PS_rest = { .string = (char *)"rest",   .len = 4 };
+static token PS_name = { .string = (char *)"Parser", .len = 6 };
+
+static obj_type *infer_parser_schema(ast *schema) {
+	if (schema->kind != AST_MAPLIT)
+		return NULL;
+	obj_type *rec = t_new(RET_OBJECT);
+	rec->class_name = &PS_name;
+	for (size_t i = 0; i < schema->nkids; i++) {
+		ast *entry = schema->kids[i];       /* AST_TUPLE(key, value) */
+		if (entry->kind != AST_TUPLE || entry->nkids != 2)
+			continue;
+		ast *key = entry->kids[0], *val = entry->kids[1];
+		if (key->kind != AST_STRING || !key->tok)
+			continue;
+		token *type_tok = NULL;
+		if (val->kind == AST_STRING && val->tok) {
+			type_tok = val->tok;                     /* "force": "bool" */
+		} else if (val->kind == AST_MAPLIT) {         /* "jobs": { "type": "int", ... } */
+			for (size_t j = 0; j < val->nkids; j++) {
+				ast *e2 = val->kids[j];
+				if (e2->kind == AST_TUPLE && e2->nkids == 2
+				 && e2->kids[0]->kind == AST_STRING && e2->kids[0]->tok
+				 && tok_is(e2->kids[0]->tok, "type")
+				 && e2->kids[1]->kind == AST_STRING && e2->kids[1]->tok)
+					type_tok = e2->kids[1]->tok;
+			}
+		}
+		ret_type rt = RET_STRING;   /* default, matches "str" and anything unrecognized */
+		if (type_tok) {
+			if (tok_is(type_tok, "bool")) rt = RET_BOOL;
+			else if (tok_is(type_tok, "int")) rt = RET_INT;
+		}
+		rec_push(rec, key->tok, t_new(rt));
+	}
+	rec_push(rec, &PS_rest, t_list(t_new(RET_STRING)));
+	return rec;
+}
+
 /* map a registered builtin's declared return type (fbuild.h) to a checker type.
  * Map/Json and ANY are RET_VAR (unknown): field access stays permissive. */
 static obj_type *fb_ret_type(fb_Ret r) {
@@ -152,24 +198,50 @@ static obj_type *fb_ret_type(fb_Ret r) {
 
 static int g_type_errors;
 
+/* Optional sink: when set, type_err() appends structured diagnostics here
+ * instead of printing to stderr. Set/cleared around a single
+ * infer_program_collect() call; NULL means the legacy stderr behavior. */
+static fb_Diag *g_diag_sink;
+static int      g_diag_cap, g_diag_n;
+
 static void type_err(token *where, const char *fmt, ...) {
 	g_type_errors++;
+	char buf[256];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof buf, fmt, ap);
+	va_end(ap);
+
+	if (g_diag_sink) {
+		if (g_diag_n < g_diag_cap) {
+			fb_Diag *d = &g_diag_sink[g_diag_n];
+			d->line = where ? where->start.line : 0;
+			d->col  = where ? where->start.col  : 0;
+			d->end_line = where ? where->end.line : d->line;
+			d->end_col  = where ? where->end.col  : d->col;
+			d->severity = FB_SEV_ERROR;
+			snprintf(d->message, sizeof d->message, "%s", buf);
+		}
+		g_diag_n++;
+		return;
+	}
+
 	fprintf(stderr, "type error");
 	if (where)
 		fprintf(stderr, " at %d:%d", where->start.line, where->start.col);
-	fprintf(stderr, ": ");
-	va_list ap;
-	va_start(ap, fmt);
-	vfprintf(stderr, fmt, ap);
-	va_end(ap);
-	fputc('\n', stderr);
+	fprintf(stderr, ": %s\n", buf);
 }
 
-/* structural compatibility; RET_VAR (unknown) unifies with anything */
+/* structural compatibility; RET_VAR (unknown) unifies with anything.
+ * RET_OBJECT does too -- field/method shapes aren't tracked (see ast.h), so
+ * treating it as strictly-typed here would false-positive on every object
+ * passed where some other type was expected. */
 static int unify(obj_type *a, obj_type *b) {
 	if (!a || !b)
 		return 1;
 	if (a->ret == RET_VAR || b->ret == RET_VAR)
+		return 1;
+	if (a->ret == RET_OBJECT || b->ret == RET_OBJECT)
 		return 1;
 	if ((a->ret == RET_INT || a->ret == RET_FLOAT) &&
 	    (b->ret == RET_INT || b->ret == RET_FLOAT))
@@ -229,9 +301,19 @@ static obj_type *positional(obj_type *t, size_t i) {
 	return t_new(RET_VAR);
 }
 
-/* named field of a record (RET_FILE), or NULL if absent */
+/* bounds-safe arg_lams[i] lookup, mirroring positional()'s own bounds check
+ * (arg_lams, when non-NULL, is exactly as long as arg->nchildren -- see
+ * specialize_call) */
+static ast *positional_lam(ast **arg_lams, obj_type *arg, size_t i) {
+	if (arg_lams && arg && arg->ret == RET_TUPLE && i < arg->nchildren)
+		return arg_lams[i];
+	return NULL;
+}
+
+/* named field of a record (RET_FILE, or a RET_OBJECT with fields tracked --
+ * e.g. a Parser<schema> result, see infer_parser_schema), or NULL if absent */
 static obj_type *record_field(obj_type *rec, token *name) {
-	if (rec && rec->ret == RET_FILE && rec->fields)
+	if (rec && (rec->ret == RET_FILE || rec->ret == RET_OBJECT) && rec->fields)
 		for (size_t i = 0; i < rec->nchildren; i++)
 			if (rec->fields[i] && tok_eq(rec->fields[i], name))
 				return rec->children[i];
@@ -269,6 +351,7 @@ static const char *ret_kind_name(ret_type r) {
 	case RET_LIST:    return "List";
 	case RET_TUPLE:   return "Tuple";
 	case RET_FUNCTOR: return "Functor";
+	case RET_OBJECT:  return "Object";   /* no class_name here -- see obj_type_print for the named form */
 	case RET_VAR:     return "?";
 	}
 	return "?";
@@ -276,7 +359,14 @@ static const char *ret_kind_name(ret_type r) {
 
 /* ---- type scope (lambda params + implicit argument) ------------------- */
 
-typedef struct tbind { token *name; obj_type *type; struct tbind *next; } tbind;
+/* `lam` (only ever set by specialize_call, hover-only): when this binding's
+ * value is a direct reference to a named top-level lambda (e.g. param `f`
+ * bound to `compile` at a call site `create_cmd(compile, ...)`), the def's
+ * own AST_LAMBDA node -- so a later call *through* this binding (`f(...)`
+ * inside create_cmd's body) can specialize `compile` itself against that
+ * inner call's real arguments, instead of showing compile's generic
+ * signature. NULL for an ordinary binding with no such provenance. */
+typedef struct tbind { token *name; obj_type *type; ast *lam; struct tbind *next; } tbind;
 
 typedef struct scope {
 	tbind        *binds;
@@ -292,18 +382,38 @@ static obj_type *scope_get(scope *s, token *name) {
 	return NULL;
 }
 
-static void scope_put(scope *s, token *name, obj_type *t) {
+static void scope_put_lam(scope *s, token *name, obj_type *t, ast *lam) {
 	tbind *b = a_alloc(sizeof *b);
 	b->name = name;
 	b->type = t;
+	b->lam  = lam;
 	b->next = s->binds;
 	s->binds = b;
+}
+
+static void scope_put(scope *s, token *name, obj_type *t) {
+	scope_put_lam(s, name, t, NULL);
 }
 
 /* ---- inference -------------------------------------------------------- */
 
 static ast      *g_program;   /* top-level scope for resolving identifiers */
 static obj_type *infer(ast *node, scope *sc);
+
+/* Hover-only: when set, infer_call() re-specializes a call to a named
+ * top-level lambda against this call site's actual argument types instead
+ * of using the def's own cached, context-free (unknown-param) type. Applies
+ * at every depth of the re-inference it's set around (nested calls inside a
+ * specialized lambda's body specialize too), so it must never be set during
+ * the normal infer_program() pass -- only fb_hover_at() toggles it, briefly,
+ * around one read-only re-inference. See find_toplevel_lambda/infer_apply. */
+static int g_specialize_calls;
+static ast *find_toplevel_lambda(ast *prog, token *name);
+static tbind *scope_find(scope *s, token *name);
+static obj_type *infer_apply(ast *fn, obj_type *arg, scope *sc);
+static obj_type *infer_apply_lam(ast *fn, obj_type *arg, ast **arg_lams, scope *sc);
+static obj_type *specialize_call(ast *node, size_t na, obj_type *a0, obj_type *a1,
+                                  scope *sc, ast *lam, ast *callee);
 
 static int is_builtin_name(token *t) {
 	static const char *names[] = {
@@ -343,8 +453,6 @@ static obj_type *infer_id(token *name) {
 				return infer(s->kids[0], NULL);   /* defs are context-free */
 		}
 	}
-	if (tok_is(name, "_GLOBALS") || tok_is(name, "_SHARED"))
-		return t_new(RET_VAR);         /* mutable store: dynamic map */
 	{
 		const fb_Reg *rg = fb_reg_findn(name->string, name->len);
 		if (rg && (rg->flags & FB_GLOBAL))   /* bound global value: type from `ret` */
@@ -394,7 +502,7 @@ static obj_type *infer_call(ast *node, scope *sc) {
 			{"keys",1,1}, {"values",1,1}, {"items",1,1},
 			{"range",1,2}, {"enumerate",1,1}, {"slice",3,3}, {"index",2,3},
 			{"reverse",1,1}, {"sum",1,-1}, {"min",1,-1}, {"max",1,-1},
-			{"count",2,2}, {"find",2,2}, {"to_int",1,1}, {"to_str",1,1}, {"to_float",1,1},
+			{"count",2,2}, {"find",2,3}, {"to_int",1,1}, {"to_str",1,1}, {"to_float",1,1},
 			{"repeat",2,2}, {"chars",1,1},
 			{"clock",0,0}, {"time",0,0}, {"sleep",1,1}, {"bench",2,2},
 			{"config",1,1}, {"flag",1,-1}, {"opt",2,2}, {"positionals",0,0},
@@ -569,10 +677,35 @@ static obj_type *infer_call(ast *node, scope *sc) {
 	}
 
 	/* otherwise: applying a user function value */
+	tbind *lb = callee->kind == AST_ID ? scope_find(sc, callee->tok) : NULL;
+	int local = lb != NULL;
 	obj_type *ft = (callee->kind == AST_ID)
-	             ? (scope_get(sc, callee->tok) ? scope_get(sc, callee->tok)
-	                                           : infer_id(callee->tok))
+	             ? (local ? lb->type : infer_id(callee->tok))
 	             : infer(callee, sc);
+	/* callee is resolved directly above (not via infer()), so it never gets
+	 * annotated the way every other node does -- do it here so hover on a
+	 * call's callee shows the function's own type, not just its call result. */
+	if (callee->kind == AST_ID)
+		callee->type = ft;
+
+	/* Hover-only re-specialization against this call's real, already-inferred
+	 * argument types, instead of a cached generic/context-free signature
+	 * (g_specialize_calls stays set through the whole walk, so a call inside
+	 * a specialized body specializes too). Left off during the normal
+	 * infer_program() pass. Two ways `lam` (the def to specialize) is found:
+	 *   - callee is a *named* top-level function (find_toplevel_lambda)
+	 *   - callee is a *local* param that's itself a direct alias for one
+	 *     (lb->lam, set by an OUTER specialize_call when binding this param
+	 *     -- e.g. create_cmd's `f`, bound to `compile` at a call site, lets
+	 *     `f(...)` inside create_cmd's body specialize `compile` itself
+	 *     against THAT inner call's real args, not just show compile's
+	 *     generic (?, ? -> Command)) */
+	if (g_specialize_calls && callee->kind == AST_ID) {
+		ast *lam = local ? lb->lam : find_toplevel_lambda(g_program, callee->tok);
+		if (lam)
+			return specialize_call(node, na, a0, a1, sc, lam, callee);
+	}
+
 	if (ft && ft->ret == RET_FUNCTOR) {
 		if (na == 1 && !unify(ft->children[0], a0))
 			type_err(callee->kind == AST_ID ? callee->tok : NULL,
@@ -584,9 +717,96 @@ static obj_type *infer_call(ast *node, scope *sc) {
 	return t_new(RET_VAR);
 }
 
+static obj_type *tuple_of_n_var(size_t n) {
+	obj_type **k = a_alloc(n * sizeof *k);
+	for (size_t i = 0; i < n; i++)
+		k[i] = t_new(RET_VAR);
+	return t_compound(RET_TUPLE, n, k);
+}
+
+/* the token a param slot binds its name from, or NULL for a slot with no
+ * single stable name (a nested destructure pattern, AST_TUPLE) */
+static token *param_name_tok(ast *p) {
+	switch (p->kind) {
+	case AST_ID:
+	case AST_PROJECTION: return p->tok;
+	case AST_CAPTURE:    return p->nkids ? p->kids[0]->tok : NULL;
+	default:             return NULL;
+	}
+}
+
+/* first call `name(...)` found anywhere in `node`, syntactically -- its
+ * arity, or -1 if `name` is never called there. Used only to guess a
+ * standalone lambda's own param types from how the body uses them (see
+ * infer_param_type_from_usage); a real call site's actual argument type,
+ * via specialization, always wins over this guess when one's available. */
+static int param_call_arity(ast *node, token *name) {
+	if (!node) return -1;
+	if (node->kind == AST_CALL && node->kids[0]->kind == AST_ID
+	    && tok_eq(node->kids[0]->tok, name))
+		return (int)(node->nkids - 1);
+	for (size_t i = 0; i < node->nkids; i++) {
+		int r = param_call_arity(node->kids[i], name);
+		if (r >= 0) return r;
+	}
+	return -1;
+}
+
+/* is `name` ever spread (`...name`) anywhere in `node`, syntactically? A
+ * splat only makes sense on a sequence (SKILLS.md: "spread into a tuple/
+ * args/command/map"), so this is as telling as param_call_arity is for a
+ * called param -- see infer_param_type_from_usage. */
+static int param_is_splatted(ast *node, token *name) {
+	if (!node) return 0;
+	if (node->kind == AST_SPLAT && node->kids[0]->kind == AST_ID
+	    && tok_eq(node->kids[0]->tok, name))
+		return 1;
+	for (size_t i = 0; i < node->nkids; i++)
+		if (param_is_splatted(node->kids[i], name)) return 1;
+	return 0;
+}
+
+/* A standalone lambda's own params have no call site to type them from, so
+ * they default to "?" (RET_VAR) -- except:
+ *   - if the body calls a param as a function (`f(...)`), that param is
+ *     evidently itself a function, so show it as a functor of that call's
+ *     arity instead of a bare "?".
+ *   - if the body ever spreads a param (`...s`), it's evidently a sequence,
+ *     so show it as List<?> instead of a bare "?".
+ * Narrow, syntactic, single-purpose (these two usage shapes only) -- not a
+ * general unification solver. */
+static obj_type *infer_param_type_from_usage(ast *p, ast *body) {
+	token *name = param_name_tok(p);
+	if (name) {
+		int arity = param_call_arity(body, name);
+		if (arity >= 0)
+			return t_functor(arity == 1 ? t_new(RET_VAR) : tuple_of_n_var((size_t)arity),
+			                  t_new(RET_VAR));
+		if (param_is_splatted(body, name))
+			return t_list(t_new(RET_VAR));
+	}
+	return t_new(RET_VAR);
+}
+
 /* bind a lambda's parameters against the argument it is applied to. A lambda
- * takes one argument; multiple params destructure it positionally. */
-static void bind_params(scope *sc, ast *params, obj_type *arg) {
+ * takes one argument; multiple params destructure it positionally.
+ *
+ * `annotate` controls the ONLY side effect that isn't scope construction:
+ * writing each param declaration's own node->type, for hover. Real inference
+ * (infer()'s AST_LAMBDA case, infer_apply) passes 1 -- the `arg` there is a
+ * real type, worth showing. locate_scope() (goto-def's/hover's structural,
+ * scope-shape-only walk) passes 0: it calls this with a placeholder RET_VAR
+ * `arg` for every lambda it structurally walks through on the way to a
+ * target -- often lambdas unrelated to what's actually being hovered -- so
+ * annotating there would stomp a real, already-correct type (or a
+ * specialized one from a previous hover) with a meaningless placeholder.
+ *
+ * `arg_lams` (may be NULL) parallels `arg`'s flattened slots (see
+ * specialize_call): arg_lams[i] is the top-level lambda node that slot i's
+ * value directly aliases, if any, so a param bound to that slot carries the
+ * alias forward (see tbind.lam) -- letting a later call *through* the param
+ * specialize the aliased function too, not just show its generic signature. */
+static void bind_params_lam(scope *sc, ast *params, obj_type *arg, ast **arg_lams, int annotate) {
 	sc->arg = arg;
 	size_t P = params->nkids;
 	for (size_t i = 0; i < P; i++) {
@@ -595,7 +815,12 @@ static void bind_params(scope *sc, ast *params, obj_type *arg) {
 		switch (p->kind) {
 		case AST_ID:                       /* x         */
 		case AST_PROJECTION:               /* .src / .0 */
-			if (p->tok) scope_put(sc, p->tok, pt);
+			if (p->tok) {
+				ast *lam = (P == 1) ? (arg_lams ? arg_lams[0] : NULL)
+				                    : positional_lam(arg_lams, arg, i);
+				scope_put_lam(sc, p->tok, pt, lam);
+			}
+			if (annotate) p->type = pt;   /* declaration site, for hover */
 			break;
 		case AST_CAPTURE:                  /* @t -> rest of the args (i..end) */
 			if (p->nkids) {
@@ -612,6 +837,22 @@ static void bind_params(scope *sc, ast *params, obj_type *arg) {
 					rest = t_new(RET_VAR);
 				}
 				scope_put(sc, p->kids[0]->tok, rest);
+				if (annotate) p->kids[0]->type = rest;   /* declaration site, for hover */
+			}
+			break;
+		case AST_TUPLE:
+			/* (a, b): destructure this one positional argument by field name.
+			 * Static field shapes aren't tracked for maps/objects (RET_VAR /
+			 * RET_OBJECT, see ast.h), so record_field() -- meaningful only for
+			 * RET_FILE records -- falls back to RET_VAR here, same permissive
+			 * behavior as an ordinary named field access on an object. */
+			for (size_t j = 0; j < p->nkids; j++) {
+				ast *sub = p->kids[j];
+				if (!sub->tok) continue;
+				obj_type *ft = record_field(pt, sub->tok);
+				obj_type *bound = ft ? ft : t_new(RET_VAR);
+				scope_put(sc, sub->tok, bound);
+				if (annotate) sub->type = bound;   /* declaration site, for hover */
 			}
 			break;
 		default:
@@ -620,11 +861,16 @@ static void bind_params(scope *sc, ast *params, obj_type *arg) {
 	}
 }
 
-/* apply a function node to an argument type, returning the result type */
-static obj_type *infer_apply(ast *fn, obj_type *arg, scope *sc) {
+static void bind_params(scope *sc, ast *params, obj_type *arg, int annotate) {
+	bind_params_lam(sc, params, arg, NULL, annotate);
+}
+
+/* apply a function node to an argument type, returning the result type.
+ * arg_lams: see bind_params_lam. */
+static obj_type *infer_apply_lam(ast *fn, obj_type *arg, ast **arg_lams, scope *sc) {
 	if (fn->kind == AST_LAMBDA) {
 		scope inner = { .parent = sc };
-		bind_params(&inner, fn->kids[0], arg);
+		bind_params_lam(&inner, fn->kids[0], arg, arg_lams, 1);
 		obj_type *res = infer(fn->kids[1], &inner);
 		fn->type = t_functor(arg, res);   /* annotate for display */
 		return res;
@@ -648,6 +894,100 @@ static obj_type *infer_apply(ast *fn, obj_type *arg, scope *sc) {
 	return t_new(RET_VAR);
 }
 
+static obj_type *infer_apply(ast *fn, obj_type *arg, scope *sc) {
+	return infer_apply_lam(fn, arg, NULL, sc);
+}
+
+/* Hover-only. Specialize `lam` (a top-level lambda, reached either by name
+ * or through a local alias -- see infer_call) against this call's real
+ * argument types, and (if `callee` is non-NULL, i.e. this call was reached
+ * via a named/aliased AST_ID callee) annotate that callee node's own hover
+ * type from the specialized param bindings, not just the call's result. */
+static obj_type *specialize_call(ast *node, size_t na, obj_type *a0, obj_type *a1,
+                                  scope *sc, ast *lam, ast *callee) {
+	/* one type per syntactic argument (a0/a1 already computed by the caller) */
+	obj_type **argt = na ? a_alloc(na * sizeof *argt) : NULL;
+	if (na >= 1) argt[0] = a0;
+	if (na >= 2) argt[1] = a1;
+	for (size_t i = 2; i < na; i++)
+		argt[i] = infer(node->kids[i + 1], sc);
+
+	/* Flatten: a splat of a known tuple contributes its own elements as
+	 * separate positional slots instead of one opaque tuple slot -- e.g.
+	 * `f(x, ...pair)` where pair:Tuple<A,B> is 3 slots (x, A, B), not 2
+	 * (x, Tuple<A,B>), so a callee param bound to one of pair's elements
+	 * gets that element's real type instead of collapsing to "?". */
+	size_t total = 0;
+	for (size_t i = 0; i < na; i++) {
+		ast *argn = node->kids[i + 1];
+		total += (argn->kind == AST_SPLAT && argt[i] && argt[i]->ret == RET_TUPLE)
+		       ? argt[i]->nchildren : 1;
+	}
+	obj_type *arg = NULL;
+	ast **arg_lams = total ? a_alloc(total * sizeof *arg_lams) : NULL;
+	if (total >= 1) {
+		obj_type **k = a_alloc(total * sizeof *k);
+		size_t j = 0;
+		for (size_t i = 0; i < na; i++) {
+			ast *argn = node->kids[i + 1];
+			if (argn->kind == AST_SPLAT && argt[i] && argt[i]->ret == RET_TUPLE) {
+				for (size_t e = 0; e < argt[i]->nchildren; e++) {
+					k[j] = argt[i]->children[e];
+					arg_lams[j] = NULL;   /* a spread element's own provenance isn't tracked */
+					j++;
+				}
+			} else {
+				k[j] = argt[i];
+				/* this slot's own alias, if it has one -- a local that's
+				 * itself an alias (recorded by an outer specialize_call), or
+				 * a direct reference to a named top-level lambda */
+				arg_lams[j] = NULL;
+				if (argn->kind == AST_ID) {
+					tbind *b = scope_find(sc, argn->tok);
+					arg_lams[j] = b ? b->lam : find_toplevel_lambda(g_program, argn->tok);
+				}
+				j++;
+			}
+		}
+		arg = (total == 1) ? k[0] : t_compound(RET_TUPLE, total, k);
+	}
+
+	obj_type *result = infer_apply_lam(lam, arg, arg_lams, NULL);
+
+	/* infer_apply_lam's bind_params_lam (annotate=1) just annotated each of
+	 * the def's own param declarations with the real type (and alias, if
+	 * any) bound at THIS call -- read the types back so the callee's own
+	 * hover (at this specific call site, not its bare/generic definition)
+	 * also reflects what it looks like as used here, not just the call's
+	 * result. Each of these ast* nodes belongs to `lam` (the shared def), so
+	 * this only affects hovering "callee" at call sites -- hovering the
+	 * def's own name still re-infers generically (no caller to inform it).
+	 *
+	 * For a param that carries an alias (arg_lams[i] set, e.g. create_cmd's
+	 * `f` bound to `compile`): the alias target's OWN ->type, not the
+	 * param's, since infer_apply_lam (just above) already fully inferred
+	 * `lam`'s body -- which, if the body calls that param (`f(...)`), just
+	 * specialized the aliased def itself via this same mechanism recursively
+	 * and left the refined signature on ITS node. The param's own ->type is
+	 * only what it looked like on the way IN (compile's generic signature);
+	 * the alias's ->type is what it turned out to mean once used. */
+	if (callee) {
+		ast *plist = lam->kids[0];
+		size_t PP = plist->nkids;
+		if (PP >= 1) {
+			obj_type **pk = a_alloc(PP * sizeof *pk);
+			for (size_t i = 0; i < PP; i++) {
+				ast *p = plist->kids[i];
+				ast *p_lam = (i < total) ? arg_lams[i] : NULL;
+				pk[i] = p_lam ? p_lam->type
+				     : (p->kind == AST_CAPTURE && p->nkids) ? p->kids[0]->type : p->type;
+			}
+			callee->type = t_functor(PP == 1 ? pk[0] : t_compound(RET_TUPLE, PP, pk), result);
+		}
+	}
+	return result;
+}
+
 /* sentinel parked on node->type while a context-free node is mid-inference,
  * so a self-referential def resolves to ? instead of recursing forever. */
 static obj_type T_INPROGRESS = { .ret = RET_VAR };
@@ -655,11 +995,16 @@ static obj_type T_INPROGRESS = { .ret = RET_VAR };
 static obj_type *infer(ast *node, scope *sc) {
 	if (!node)
 		return t_new(RET_VAR);
-	if (!sc && node->type) {      /* context-free memo (shared ids -> DAG) */
-		if (node->type == &T_INPROGRESS)   /* recursive re-entry */
-			return t_new(RET_VAR);
+	/* Cycle guard: always active when !sc, specializing or not -- a
+	 * self-referential def must not recurse forever just because hover asked
+	 * for a fresher answer. Separate from the cache-value reuse right below,
+	 * which IS skipped under g_specialize_calls (hover): that pass exists
+	 * specifically to get a fresher, call-site-specific answer than whatever
+	 * infer_program()'s original pass already cached here. */
+	if (!sc && node->type == &T_INPROGRESS)
+		return t_new(RET_VAR);
+	if (!sc && node->type && !g_specialize_calls)   /* context-free memo (shared ids -> DAG) */
 		return node->type;
-	}
 	if (!sc)
 		node->type = &T_INPROGRESS;
 
@@ -688,7 +1033,8 @@ static obj_type *infer(ast *node, scope *sc) {
 
 	case AST_OBJNEW:                                 /* object of unknown shape */
 		infer(node->kids[0], sc);                    /* check the fields body    */
-		t = t_new(RET_VAR);
+		t = t_new(RET_OBJECT);
+		t->class_name = node->tok;                   /* class name, e.g. "Point" */
 		break;
 
 	case AST_METHODDEF:                              /* method Class.name = fn   */
@@ -768,10 +1114,24 @@ static obj_type *infer(ast *node, scope *sc) {
 		t = t_functor(t_file(), t_file());
 		break;
 
-	case AST_LAMBDA: {               /* standalone: arg type unknown */
+	case AST_LAMBDA: {               /* standalone: arg type(s) unknown, refined a little from usage */
 		scope inner = { .parent = sc };
-		obj_type *param = t_new(RET_VAR);
-		bind_params(&inner, node->kids[0], param);
+		ast *plist = node->kids[0];
+		size_t P = plist->nkids;
+		obj_type *param;
+		if (P <= 1) {
+			param = P == 1 ? infer_param_type_from_usage(plist->kids[0], node->kids[1])
+			               : t_new(RET_VAR);
+		} else {
+			/* one slot per param (not a bare "?") so a multi-param
+			 * standalone lambda's own signature shows its arity, e.g.
+			 * "(?, ?, ? -> ?)" instead of collapsing to "(? -> ?)". */
+			obj_type **k = a_alloc(P * sizeof *k);
+			for (size_t i = 0; i < P; i++)
+				k[i] = infer_param_type_from_usage(plist->kids[i], node->kids[1]);
+			param = t_compound(RET_TUPLE, P, k);
+		}
+		bind_params(&inner, plist, param, 1);
 		t = t_functor(param, infer(node->kids[1], &inner));
 		break;
 	}
@@ -821,7 +1181,7 @@ static obj_type *infer(ast *node, scope *sc) {
 			t = positional(base, (size_t)idx);
 		} else {
 			obj_type *ft = record_field(base, node->tok);
-			if (!ft && base && base->ret != RET_VAR)
+			if (!ft && base && base->ret != RET_VAR && base->ret != RET_OBJECT)
 				type_err(node->tok, "%s has no field '%.*s'",
 				         ret_kind_name(base->ret),
 				         (int)node->tok->len, node->tok->string);
@@ -909,10 +1269,12 @@ static obj_type *infer(ast *node, scope *sc) {
 		t = t_new(RET_VAR);
 		break;
 
-	case AST_PARSER:               /* Parser<schema> : dynamic map of results */
+	case AST_PARSER: {              /* Parser<schema> : record, if schema is a literal map */
 		infer(node->kids[0], sc);
-		t = t_new(RET_VAR);
+		obj_type *rec = infer_parser_schema(node->kids[0]);
+		t = rec ? rec : t_new(RET_VAR);
 		break;
+	}
 
 	/* structural nodes carry no value type of their own */
 	case AST_PROGRAM:
@@ -951,6 +1313,11 @@ void obj_type_print(obj_type *t) {
 	case RET_COMMAND: printf("Command"); break;
 	case RET_VAR:     printf("?");       break;
 
+	case RET_OBJECT:
+		if (t->class_name) printf("%.*s", (int)t->class_name->len, t->class_name->string);
+		else                printf("Object");
+		break;
+
 	case RET_LIST:
 		printf("List<");
 		obj_type_print(t->nchildren ? t->children[0] : NULL);
@@ -966,13 +1333,25 @@ void obj_type_print(obj_type *t) {
 		printf(">");
 		break;
 
-	case RET_FUNCTOR:
+	case RET_FUNCTOR: {
 		printf("(");
-		obj_type_print(t->nchildren > 0 ? t->children[0] : NULL);
+		/* a multi-param functor's own param slot is a RET_TUPLE (one entry
+		 * per param, see infer()'s AST_LAMBDA case) -- show it flattened as
+		 * "a, b, c -> r", not wrapped as "Tuple<a, b, c> -> r". */
+		obj_type *p = t->nchildren > 0 ? t->children[0] : NULL;
+		if (p && p->ret == RET_TUPLE) {
+			for (size_t i = 0; i < p->nchildren; i++) {
+				if (i) printf(", ");
+				obj_type_print(p->children[i]);
+			}
+		} else {
+			obj_type_print(p);
+		}
 		printf(" -> ");
 		obj_type_print(t->nchildren > 1 ? t->children[1] : NULL);
 		printf(")");
 		break;
+	}
 	}
 }
 
@@ -1016,17 +1395,403 @@ static void check_recursion(token *name, ast *node, int guarded) {
 		check_recursion(name, node->kids[i], guarded);
 }
 
-int infer_program(ast *prog) {
+/* shared body: g_type_errors is reset here so repeated calls in one process
+ * (e.g. a daemon re-checking an edited document) don't accumulate across
+ * calls. g_diag_sink must be set/cleared by the caller. */
+static int infer_program_impl(ast *prog) {
 	g_program = prog;
+	g_type_errors = 0;
 	for (size_t i = 0; i < prog->nkids; i++) {
 		ast *s = prog->kids[i];
 		int is_def = (s->kind == AST_ASSIGN || s->kind == AST_EAGER);
-		infer_type(is_def ? s->kids[0] : s);  /* type-check */
-		if (is_def)
+		obj_type *t = infer_type(is_def ? s->kids[0] : s);  /* type-check */
+		if (is_def) {
+			/* infer_type() above types the RHS; the AST_ASSIGN/AST_EAGER node
+			 * itself (whose tok is the def's own name, at its declaration
+			 * site) is never otherwise visited by infer() -- annotate it here
+			 * so hovering the LHS name shows the def's type, not "?". */
+			s->type = t;
 			check_recursion(s->tok, s->kids[0], 0);
+		}
 	}
-	if (g_type_errors)
-		fprintf(stderr, "%d type error%s\n",
-		        g_type_errors, g_type_errors == 1 ? "" : "s");
 	return g_type_errors;
+}
+
+int infer_program(ast *prog) {
+	g_diag_sink = NULL;
+	int errs = infer_program_impl(prog);
+	if (errs)
+		fprintf(stderr, "%d type error%s\n", errs, errs == 1 ? "" : "s");
+	return errs;
+}
+
+int infer_program_collect(ast *prog, fb_Diag *diags, int max_diags) {
+	g_diag_sink = diags;
+	g_diag_cap  = max_diags;
+	g_diag_n    = 0;
+	int errs = infer_program_impl(prog);
+	g_diag_sink = NULL;
+	return errs;
+}
+
+/* ============================================================================
+ * Source-position tooling (hover / goto-definition), for embedders like an
+ * LSP daemon. Everything below is read-only over an already-parsed,
+ * already-inferred `ast *prog` -- no execution, no type_err()/diagnostics.
+ * ========================================================================== */
+
+/* ---- spans -------------------------------------------------------------- */
+
+static int pos_before(fb_Pos a, fb_Pos b) {
+	return a.line < b.line || (a.line == b.line && a.col < b.col);
+}
+static int pos_after(fb_Pos a, fb_Pos b) {
+	return a.line > b.line || (a.line == b.line && a.col > b.col);
+}
+static int span_empty(fb_Span s) {
+	return s.start.line == 0 && s.start.col == 0 && s.end.line == 0 && s.end.col == 0;
+}
+
+fb_Span ast_span(const ast *n) {
+	fb_Span s = { .start = {0, 0}, .end = {0, 0} };
+	if (!n) return s;
+	int have = 0;
+	if (n->tok) {
+		s.start = (fb_Pos){ n->tok->start.line, n->tok->start.col };
+		s.end   = (fb_Pos){ n->tok->end.line,   n->tok->end.col };
+		have = 1;
+	}
+	for (size_t i = 0; i < n->nkids; i++) {
+		if (!n->kids[i]) continue;   /* guard/where/when slots may be absent */
+		fb_Span c = ast_span(n->kids[i]);
+		if (span_empty(c)) continue;
+		if (!have || pos_before(c.start, s.start)) s.start = c.start;
+		if (!have || pos_after(c.end, s.end))       s.end   = c.end;
+		have = 1;
+	}
+	return s;
+}
+
+static int span_contains(fb_Span s, int line, int col) {
+	if (span_empty(s)) return 0;
+	fb_Pos p = { line, col };
+	return !pos_before(p, s.start) && !pos_after(p, s.end);
+}
+
+/* innermost node whose span covers (line, col), or NULL if none does. */
+static ast *find_node(ast *n, int line, int col) {
+	if (!n) return NULL;
+	if (!span_contains(ast_span(n), line, col)) return NULL;
+	for (size_t i = 0; i < n->nkids; i++) {
+		ast *hit = find_node(n->kids[i], line, col);
+		if (hit) return hit;
+	}
+	return n;
+}
+
+/* ---- symbol tables (top-level defs, methods) ---------------------------- */
+
+typedef struct { token *name; ast *site; } fb_DefSym;
+typedef struct { token *class_name, *method_name; ast *site; } fb_MethodSym;
+
+#define FB_MAX_DEFSYMS    4096
+#define FB_MAX_METHODSYMS 4096
+static fb_DefSym    g_defsyms[FB_MAX_DEFSYMS];
+static int          g_ndefsyms;
+static fb_MethodSym g_methodsyms[FB_MAX_METHODSYMS];
+static int          g_nmethodsyms;
+
+/* One flat pass over prog's top-level statements. Class constructors
+ * (`type Name(...) = ...`) desugar to plain AST_ASSIGN at parse time so
+ * they're already covered by the AST_ASSIGN/AST_EAGER case -- no special
+ * handling needed. Wildcard method copies (`method New.* = Old.*`, tok ==
+ * NULL) name no single method and are skipped. */
+static void collect_symbols(ast *prog) {
+	g_ndefsyms = 0;
+	g_nmethodsyms = 0;
+	for (size_t i = 0; i < prog->nkids; i++) {
+		ast *s = prog->kids[i];
+		if ((s->kind == AST_ASSIGN || s->kind == AST_EAGER) && s->tok) {
+			if (g_ndefsyms < FB_MAX_DEFSYMS) {
+				g_defsyms[g_ndefsyms].name = s->tok;
+				g_defsyms[g_ndefsyms].site = s;
+				g_ndefsyms++;
+			}
+		} else if (s->kind == AST_METHODDEF && s->tok) {
+			if (g_nmethodsyms < FB_MAX_METHODSYMS) {
+				g_methodsyms[g_nmethodsyms].class_name  = s->kids[0]->tok;
+				g_methodsyms[g_nmethodsyms].method_name = s->tok;
+				g_methodsyms[g_nmethodsyms].site = s;
+				g_nmethodsyms++;
+			}
+		} else if (s->kind == AST_METHODCOPY && s->tok) {   /* NULL tok = wildcard, skip */
+			if (g_nmethodsyms < FB_MAX_METHODSYMS) {
+				g_methodsyms[g_nmethodsyms].class_name  = s->kids[0]->tok;
+				g_methodsyms[g_nmethodsyms].method_name = s->tok;
+				g_methodsyms[g_nmethodsyms].site = s;
+				g_nmethodsyms++;
+			}
+		}
+	}
+}
+
+/* ---- scope-threading walk (locals: lambda params / where-bindings) ------ */
+
+static tbind *scope_find(scope *s, token *name) {
+	for (; s; s = s->parent)
+		for (tbind *b = s->binds; b; b = b->next)
+			if (tok_eq(b->name, name))
+				return b;
+	return NULL;
+}
+
+/* Recurse from `n` down to `target`, threading the same scope-introducing
+ * rules infer() uses (AST_LAMBDA binds params, AST_GUARD's `where` binds),
+ * and return the scope in effect at `target`. Unlike infer(), the scope
+ * frames here must outlive this call (the caller reads them afterward), so
+ * they're arena-allocated rather than stack-allocated like infer()'s. Only
+ * structural scope shape matters -- bound types are placeholders (RET_VAR),
+ * never read by callers of this walk. */
+static scope *locate_scope(ast *n, ast *target, scope *sc) {
+	if (!n) return NULL;
+	if (n == target) return sc;
+	switch (n->kind) {
+	case AST_LAMBDA: {
+		scope *inner = a_alloc(sizeof *inner);
+		inner->parent = sc;
+		bind_params(inner, n->kids[0], t_new(RET_VAR), 0);
+		scope *hit = locate_scope(n->kids[0], target, sc);   /* params themselves: outer scope */
+		if (hit) return hit;
+		return locate_scope(n->kids[1], target, inner);
+	}
+	case AST_GUARD: {
+		scope *gs = a_alloc(sizeof *gs);
+		gs->parent = sc;
+		gs->arg = sc ? sc->arg : NULL;
+		ast *where = n->kids[1];
+		ast *whenc = n->kids[2];
+		if (where)
+			for (size_t i = 0; i < where->nkids; i++) {
+				ast *bd = where->kids[i];   /* AST_BINDING */
+				scope_put(gs, bd->tok, t_new(RET_VAR));
+			}
+		scope *bsc = where ? gs : sc;
+		if (where) {
+			scope *hit = locate_scope(where, target, bsc);
+			if (hit) return hit;
+		}
+		if (whenc) {
+			scope *hit = locate_scope(whenc, target, bsc);
+			if (hit) return hit;
+		}
+		return locate_scope(n->kids[0], target, bsc);
+	}
+	default:
+		for (size_t i = 0; i < n->nkids; i++) {
+			scope *hit = locate_scope(n->kids[i], target, sc);
+			if (hit) return hit;
+		}
+		return NULL;
+	}
+}
+
+/* ---- go-to-definition ---------------------------------------------------- */
+
+int fb_find_definition(ast *prog, int line, int col, fb_Definition *out, int max_out) {
+	if (!prog || !out || max_out <= 0) return 0;
+	collect_symbols(prog);
+
+	ast *n = find_node(prog, line, col);
+	if (!n) return 0;
+
+	/* base.method_name(...) / base.method_name : resolve by method name
+	 * across every class (no receiver-type narrowing in v1 -- the receiver's
+	 * static type is RET_VAR for any AST_OBJNEW-produced object, so the
+	 * class isn't statically knowable). Ambiguous name -> multiple results. */
+	if (n->kind == AST_FIELD && n->tok) {
+		int nout = 0;
+		for (int i = 0; i < g_nmethodsyms && nout < max_out; i++)
+			if (tok_eq(g_methodsyms[i].method_name, n->tok)) {
+				out[nout].def_span = ast_span(g_methodsyms[i].site);
+				out[nout].kind = FB_DEF_METHOD;
+				nout++;
+			}
+		return nout;
+	}
+
+	if (n->kind != AST_ID) return 0;
+
+	scope *sc = locate_scope(prog, n, NULL);
+	tbind *b = sc ? scope_find(sc, n->tok) : NULL;
+	if (b) {
+		out[0].def_span = (fb_Span){
+			.start = { b->name->start.line, b->name->start.col },
+			.end   = { b->name->end.line,   b->name->end.col },
+		};
+		out[0].kind = FB_DEF_LOCAL;
+		return 1;
+	}
+
+	for (int i = 0; i < g_ndefsyms; i++)
+		if (tok_eq(g_defsyms[i].name, n->tok)) {
+			out[0].def_span = ast_span(g_defsyms[i].site);
+			out[0].kind = FB_DEF_TOPLEVEL;
+			return 1;
+		}
+
+	return 0;   /* builtin (no site in this file) or genuinely unresolved */
+}
+
+/* ---- hover ---------------------------------------------------------------
+ * node->type is already populated by infer_program_collect()/infer_program()
+ * (every visited node gets one, walk.c:~930) -- hover just has to find the
+ * node and print it. */
+
+static void obj_type_sprint_into(obj_type *t, char *buf, size_t bufsz, size_t *pos) {
+#define APPEND(...) do { \
+		if (*pos < bufsz) { \
+			int _w = snprintf(buf + *pos, bufsz - *pos, __VA_ARGS__); \
+			if (_w > 0) *pos += ((size_t)_w < bufsz - *pos) ? (size_t)_w : bufsz - *pos; \
+		} \
+	} while (0)
+	if (!t) { APPEND("?"); return; }
+	switch (t->ret) {
+	case RET_NONE:    APPEND("None");    break;
+	case RET_INT:     APPEND("Int");     break;
+	case RET_FLOAT:   APPEND("Float");   break;
+	case RET_STRING:  APPEND("String");  break;
+	case RET_BOOL:    APPEND("Bool");    break;
+	case RET_FILE:    APPEND("File");    break;
+	case RET_COMMAND: APPEND("Command"); break;
+	case RET_VAR:     APPEND("?");       break;
+	case RET_OBJECT:
+		if (t->class_name) APPEND("%.*s", (int)t->class_name->len, t->class_name->string);
+		else                APPEND("Object");
+		break;
+	case RET_LIST:
+		APPEND("List<");
+		obj_type_sprint_into(t->nchildren ? t->children[0] : NULL, buf, bufsz, pos);
+		APPEND(">");
+		break;
+	case RET_TUPLE:
+		APPEND("Tuple<");
+		for (size_t i = 0; i < t->nchildren; i++) {
+			if (i) APPEND(", ");
+			obj_type_sprint_into(t->children[i], buf, bufsz, pos);
+		}
+		APPEND(">");
+		break;
+	case RET_FUNCTOR: {
+		APPEND("(");
+		/* see obj_type_print's identical case for why: flatten a multi-param
+		 * functor's Tuple<...> param slot into "a, b, c -> r". */
+		obj_type *p = t->nchildren > 0 ? t->children[0] : NULL;
+		if (p && p->ret == RET_TUPLE) {
+			for (size_t i = 0; i < p->nchildren; i++) {
+				if (i) APPEND(", ");
+				obj_type_sprint_into(p->children[i], buf, bufsz, pos);
+			}
+		} else {
+			obj_type_sprint_into(p, buf, bufsz, pos);
+		}
+		APPEND(" -> ");
+		obj_type_sprint_into(t->nchildren > 1 ? t->children[1] : NULL, buf, bufsz, pos);
+		APPEND(")");
+		break;
+	}
+	}
+#undef APPEND
+}
+
+char *obj_type_sprint(obj_type *t) {
+	char buf[512];
+	size_t pos = 0;
+	obj_type_sprint_into(t, buf, sizeof buf, &pos);
+	return a_dup(buf);
+}
+
+/* top-level `NAME = params -> body` (or ~=) whose RHS is a lambda, or NULL.
+ * Used to re-specialize a call's result type against its actual argument
+ * types, since infer_id's cached type for a standalone def always used an
+ * unknown (RET_VAR) param -- there's no single call site to inform it when
+ * it's inferred context-free. */
+static ast *find_toplevel_lambda(ast *prog, token *name) {
+	for (size_t i = 0; i < prog->nkids; i++) {
+		ast *s = prog->kids[i];
+		if ((s->kind == AST_ASSIGN || s->kind == AST_EAGER) && s->tok
+		    && tok_eq(s->tok, name) && s->kids[0]->kind == AST_LAMBDA)
+			return s->kids[0];
+	}
+	return NULL;
+}
+
+static int ast_contains(ast *n, const ast *target) {
+	if (!n) return 0;
+	if (n == target) return 1;
+	for (size_t i = 0; i < n->nkids; i++)
+		if (ast_contains(n->kids[i], target)) return 1;
+	return 0;
+}
+
+/* which top-level statement's subtree `target` lives in, or NULL */
+static ast *find_enclosing_toplevel(ast *prog, const ast *target) {
+	for (size_t i = 0; i < prog->nkids; i++)
+		if (ast_contains(prog->kids[i], target)) return prog->kids[i];
+	return NULL;
+}
+
+int fb_hover_at(ast *prog, int line, int col, fb_HoverInfo *out) {
+	if (!prog || !out) return 0;
+	ast *n = find_node(prog, line, col);
+	if (!n) return 0;
+	out->span = ast_span(n);
+
+	/* A registered name (builtin or FB_GLOBAL-bound plugin value, e.g. the
+	 * "math" namespace) with an optional doc string takes priority over the
+	 * bare inferred type -- these are frequently RET_VAR/"?" (no static
+	 * shape tracked), so a doc string is the only useful thing to show. */
+	const fb_Reg *rg = (n->kind == AST_ID && n->tok)
+	                  ? fb_reg_findn(n->tok->string, n->tok->len) : NULL;
+	if (rg && rg->doc) {
+		out->text = a_dup(rg->doc);
+		return 1;
+	}
+
+	/* Re-infer the WHOLE enclosing top-level statement's RHS from scratch,
+	 * with call-site specialization on (g_specialize_calls, see infer_call):
+	 * a call to a named top-level function anywhere in it, at any depth,
+	 * resolves against its *real* argument types instead of the def's own
+	 * generic/context-free signature.
+	 *
+	 * This must walk from the enclosing STATEMENT, not from `n` itself --
+	 * locate_scope() (used for goto-def) only reconstructs scope *structure*
+	 * with placeholder RET_VAR args, since it has no real argument types to
+	 * work with; using it here would seed e.g. a pipe-lambda's param with a
+	 * placeholder instead of the pipe's real element type, silently
+	 * corrupting specialization deeper in (found the hard way: a capture
+	 * param downstream of one came out an empty tuple instead of real
+	 * types). Re-inferring from the statement's RHS with sc=NULL instead
+	 * threads real types through every local binding the normal way (e.g.
+	 * AST_PIPE calling infer_apply with the pipe's real element type). Side
+	 * effects of that walk (n->type / a call's callee->type / a param
+	 * declaration's ->type) land on `n` itself as a natural byproduct of
+	 * reaching it, however deep it is -- so just read n->type back after.
+	 *
+	 * Exception: when `n` IS the enclosing statement (hovering a def's own
+	 * LHS name), it's the ASSIGN/EAGER wrapper, never a descendant of its
+	 * own RHS -- inferring the RHS can't land on it as a side effect. Write
+	 * the result back explicitly, same as infer_program_impl's main-pass
+	 * convention (s->type = t) for exactly this node. */
+	ast *stmt = find_enclosing_toplevel(prog, n);
+	if (stmt) {
+		int is_def = stmt->kind == AST_ASSIGN || stmt->kind == AST_EAGER;
+		ast *rhs = is_def ? stmt->kids[0] : stmt;
+		g_specialize_calls = 1;
+		obj_type *t = infer(rhs, NULL);
+		if (is_def)
+			stmt->type = t;
+		g_specialize_calls = 0;
+	}
+	out->text = obj_type_sprint(n->type);
+	return 1;
 }

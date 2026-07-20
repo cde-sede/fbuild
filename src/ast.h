@@ -75,6 +75,11 @@ typedef enum {
 	RET_TUPLE,      /* fixed arity, heterogeneous: children[0..nchildren)*/
 	RET_FUNCTOR,    /* function: children[0]=param, children[1]=result   */
 
+	RET_OBJECT,     /* type NAME(...) = ... instance; class_name = NAME. Field
+	                 * shapes aren't tracked (same as RET_FILE-record depth) --
+	                 * this exists so hover/errors can name the class instead
+	                 * of falling back to "?"; no static field/method checking. */
+
 	RET_VAR,        /* not yet resolved (inference placeholder)          */
 } ret_type;
 
@@ -87,6 +92,7 @@ typedef struct obj_type {
 	size_t            nchildren;
 	token           **fields;   /* record (RET_FILE) field names, parallel
 	                             * to children; NULL for non-records       */
+	token            *class_name;   /* RET_OBJECT only: the `type NAME(...)` name */
 } obj_type;
 
 typedef struct ast {
@@ -111,10 +117,49 @@ ast *parse_program(void);   /* parses the global token stream from cur=0 */
 void ast_print(ast *n, int depth);
 void ast_free(ast *n);
 
+/* Structured diagnostics (positions are 1-based, matching token.start/end).
+ * Used by tools (e.g. an LSP daemon) that need type errors as data instead
+ * of stderr text. */
+typedef enum { FB_SEV_ERROR = 1, FB_SEV_WARNING = 2 } fb_Severity;
+typedef struct {
+	int line, col, end_line, end_col;   /* 1-based; end == start if unknown */
+	fb_Severity severity;
+	char message[256];
+} fb_Diag;
+
 /* type inference (walk.c) */
 obj_type *infer_type(ast *node);
-int       infer_program(ast *prog);   /* returns type-error count */
+int       infer_program(ast *prog);   /* returns type-error count; prints to stderr */
+/* Same as infer_program, but appends each error as an fb_Diag instead of
+ * printing it. Writes at most max_diags entries; returns the total error
+ * count (may exceed max_diags). */
+int       infer_program_collect(ast *prog, fb_Diag *diags, int max_diags);
 void      obj_type_print(obj_type *t);
+char     *obj_type_sprint(obj_type *t);   /* string variant, arena-allocated */
+
+/* ---- source-position tooling (walk.c): hover / go-to-definition --------
+ * Read-only over an already-parsed, already-inferred `prog` (i.e. call after
+ * infer_program()/infer_program_collect() succeeded) -- no execution. */
+
+typedef struct { int line, col; } fb_Pos;
+typedef struct { fb_Pos start, end; } fb_Span;   /* 1-based; {0,0}/{0,0} = empty/unknown */
+
+fb_Span ast_span(const ast *n);   /* source range covering n and all its descendants */
+
+typedef enum { FB_DEF_LOCAL = 0, FB_DEF_TOPLEVEL = 1, FB_DEF_METHOD = 2 } fb_DefKind;
+typedef struct { fb_Span def_span; fb_DefKind kind; } fb_Definition;
+
+/* What's at (line, col) in prog, 1-based, resolves to. Writes at most
+ * max_out entries (>1 only for an ambiguous method name across classes,
+ * FB_DEF_METHOD). Returns the count written, or 0 if there's no definition
+ * site in this file (builtin, or unresolved). */
+int fb_find_definition(ast *prog, int line, int col, fb_Definition *out, int max_out);
+
+typedef struct { char *text; fb_Span span; } fb_HoverInfo;
+
+/* Inferred type of the node at (line, col), rendered as a string (see
+ * obj_type_sprint). Returns 0 if no node covers that position. */
+int fb_hover_at(ast *prog, int line, int col, fb_HoverInfo *out);
 
 /* executor (run.c). argc/argv are the program's CLI args; args[2..] become
  * the language-level `args` list. */

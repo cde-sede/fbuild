@@ -13,9 +13,9 @@
 
 ; Assignment / binding targets.
 (assignment name: (identifier) @variable)
-(binding name: (identifier) @variable)
-((assignment name: (identifier) @constant)
-  (#match? @constant "^[a-zA-Z_][a-zA-Z0-9_]*$"))
+(binding name: (identifier) @operator)
+;((assignment name: (identifier) @constant)
+;  (#match? @constant "^[a-zA-Z_][a-zA-Z0-9_]*$"))
 
 ; Function calls: identifier immediately followed by "(...)".
 (postfix_expression

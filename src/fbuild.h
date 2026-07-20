@@ -15,8 +15,9 @@
  * ============================================================================ */
 
 #include <stddef.h>
+#include "ast.h"   /* ast, fb_Diag/fb_Severity -- needed by fb_check() below */
 
-#define FBUILD_ABI 2              /* bump on any incompatible ABI change */
+#define FBUILD_ABI 3              /* bump on any incompatible ABI change */
 
 typedef struct fb_State fb_State; /* opaque interpreter state            */
 typedef struct fb_val  *fb_Value; /* opaque value handle (arena-owned)   */
@@ -67,13 +68,18 @@ typedef fb_Value (*fb_CFunction)(fb_State *S, fb_Value *args, int nargs);
                        * not a callable -- the checker types a bare reference
                        * to it from `ret` directly instead of RET_VAR. */
 
-/* Registration record. `max < 0` means variadic. `ret` drives type inference. */
+/* Registration record. `max < 0` means variadic. `ret` drives type inference.
+ * `doc` is optional (NULL is fine, existing designated-initializer callsites
+ * that don't set it get NULL for free) -- a one-line human-readable summary
+ * shown by tools (e.g. an LSP daemon's hover) instead of falling back to the
+ * bare inferred type; has no effect on inference or the runtime itself. */
 typedef struct {
 	const char  *name;
 	fb_CFunction fn;
 	int          min, max;
 	fb_Ret       ret;
 	unsigned     flags;   /* 0, or a bitwise-or of FB_* flags */
+	const char  *doc;     /* optional: one-line description, or NULL */
 } fb_Reg;
 
 /* Evaluate a thunk argument passed to an FB_LAZY builtin (returns it unchanged
@@ -200,10 +206,30 @@ const char *fb_key  (fb_Value map, int i);       /* map key #i (NULL if oob) */
 /* ---- calling back into the language ----------------------------------- */
 fb_Value fb_apply(fb_State *S, fb_Value fn, fb_Value *args, int nargs);
 
+/* ---- check without executing -------------------------------------------
+ * Parse + type-check `src`, but never call run_program() -- no shell command,
+ * file write, or other side effect ever happens. For tools (e.g. an LSP
+ * daemon) that want live diagnostics on an in-progress edit without running
+ * the script.
+ *
+ * On a syntax error: writes exactly one diagnostic, *out_prog = NULL.
+ * On a clean parse: type-checks, writes up to max_diags diagnostics (one per
+ * type error), *out_prog = the parsed program (arena-owned by S; valid until
+ * S is closed or reused by another fb_dostring/fb_dofile/fb_check call).
+ * Returns the total diagnostic count (may exceed max_diags). Loads env
+ * plugins first, same as fb_dostring. */
+int fb_check(fb_State *S, const char *src, const char *chunkname,
+              fb_Diag *diags, int max_diags, ast **out_prog);
+
 /* ---- error signalling ------------------------------------------------- */
 /* Aborts the current builtin. Under a protected boundary (embedding) it
  * unwinds to that boundary; otherwise it prints and exits. Never returns
  * (return type is fb_Value only so `return fb_error(...);` type-checks). */
 fb_Value fb_error(fb_State *S, const char *fmt, ...);
+/* Same as fb_error, but also records a 1-based source position (0,0 = none)
+ * that a caller can recover via fb_error_pos() after the call unwinds. */
+fb_Value fb_error_at(fb_State *S, int line, int col, const char *fmt, ...);
+/* Position recorded by the most recent fb_error_at on S (0,0 if unset/unknown). */
+void fb_error_pos(fb_State *S, int *line, int *col);
 
 #endif /* FBUILD_H */
