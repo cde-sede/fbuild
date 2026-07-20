@@ -414,6 +414,8 @@ static obj_type *infer_apply(ast *fn, obj_type *arg, scope *sc);
 static obj_type *infer_apply_lam(ast *fn, obj_type *arg, ast **arg_lams, scope *sc);
 static obj_type *specialize_call(ast *node, size_t na, obj_type *a0, obj_type *a1,
                                   scope *sc, ast *lam, ast *callee);
+static obj_type *tuple_of_n_var(size_t n);
+static obj_type *t_variadic(obj_type *elem);
 
 static int is_builtin_name(token *t) {
 	static const char *names[] = {
@@ -465,7 +467,143 @@ static obj_type *infer_id(token *name) {
 	return t_new(RET_VAR);
 }
 
-static obj_type *infer_call(ast *node, scope *sc) {
+/* core builtins' {min, max} arity (-1 max = variadic). File-scope (not just
+ * inside infer_call_impl) so infer_call's wrapper can also read it, to give
+ * a callee like "zip"/"print" a real functor shape for hover instead of a
+ * bare "?" -- these are dispatched by this name-match chain with early
+ * returns, never reaching the "user function value" callee->type = ft
+ * annotation used by everything else. */
+static const struct { const char *name; int min, max; } g_core_arity[] = {
+	{"glob",1,1}, {"subst",3,3}, {"stale",1,-1}, {"zip",2,-1},
+	{"env",1,1}, {"shell",1,1}, {"which",1,1}, {"exists",1,1},
+	{"mkdir",1,1}, {"read",1,1}, {"write",2,2},
+	{"move",2,2}, {"copy",2,2}, {"symlink",2,2}, {"remove",1,1},
+	{"touch",1,1}, {"is_dir",1,1}, {"is_file",1,1},
+	{"filter",2,2}, {"contains",2,2}, {"flatten",1,1}, {"concat",0,-1},
+	{"fold",3,3}, {"length",1,1}, {"first",1,1}, {"last",1,1},
+	{"take",2,2}, {"drop",2,2}, {"sort",1,1}, {"unique",1,1},
+	{"join",2,2}, {"split",2,2}, {"replace",3,3},
+	{"cat",0,-1}, {"upper",1,1}, {"lower",1,1}, {"trim",1,1},
+	{"starts_with",2,2}, {"ends_with",2,2},
+	{"capitalize",1,1}, {"title",1,1}, {"lstrip",1,1}, {"rstrip",1,1},
+	{"strip_prefix",2,2}, {"strip_suffix",2,2},
+	{"pad_left",2,3}, {"pad_right",2,3}, {"center",2,3},
+	{"parent",1,1}, {"name",1,1}, {"stem",1,1}, {"suffix",1,1},
+	{"with_suffix",2,2}, {"with_name",2,2}, {"path",0,-1}, {"abs",1,1},
+	{"run",1,-1}, {"print",0,-1}, {"debug",0,-1},
+	{"json_parse",1,1}, {"json_read",1,1}, {"json_str",1,1},
+	{"json_pretty",1,1}, {"json_write",2,2},
+	{"get",2,2}, {"has",2,2},
+	{"keys",1,1}, {"values",1,1}, {"items",1,1},
+	{"range",1,2}, {"enumerate",1,1}, {"slice",3,3}, {"index",2,3},
+	{"reverse",1,1}, {"sum",1,-1}, {"min",1,-1}, {"max",1,-1},
+	{"count",2,2}, {"find",2,3}, {"to_int",1,1}, {"to_str",1,1}, {"to_float",1,1},
+	{"repeat",2,2}, {"chars",1,1},
+	{"clock",0,0}, {"time",0,0}, {"sleep",1,1}, {"bench",2,2},
+	{"config",1,1}, {"flag",1,-1}, {"opt",2,2}, {"positionals",0,0},
+};
+#define N_CORE_ARITY (sizeof g_core_arity / sizeof g_core_arity[0])
+
+static obj_type *tvar(const char *label) {
+	obj_type *t = t_new(RET_VAR);
+	t->var_label = label;
+	return t;
+}
+
+/* Hand-written structural signatures (with shared, cosmetically-labeled type
+ * variables -- see obj_type.var_label) for core builtins whose SKILLS.md
+ * documented type is genuinely generic/higher-order, e.g.
+ *   filter : List<a> -> (a -> Bool) -> List<a>
+ * Consulted only as a fallback for a builtin callee's hover with no call
+ * site to specialize from (infer_call's wrapper, below); a real call always
+ * overrides this with the call's own actual types via the normal dispatch.
+ * NULL for anything not curated here -- falls back further to the plain
+ * arity-shaped ("?, ? -> T") signature built from g_core_arity. */
+static obj_type *core_generic_signature(token *name) {
+	if (tok_is(name, "zip")) {
+		obj_type *a = tvar("a"), *b = tvar("b");
+		obj_type **k = a_alloc(2 * sizeof *k);
+		k[0] = t_list(a); k[1] = t_list(b);
+		obj_type **rk = a_alloc(2 * sizeof *rk);
+		rk[0] = a; rk[1] = b;
+		return t_functor(t_compound(RET_TUPLE, 2, k),
+		                  t_list(t_compound(RET_TUPLE, 2, rk)));
+	}
+	if (tok_is(name, "filter")) {
+		obj_type *a = tvar("a");
+		obj_type **k = a_alloc(2 * sizeof *k);
+		k[0] = t_list(a); k[1] = t_functor(a, t_new(RET_BOOL));
+		return t_functor(t_compound(RET_TUPLE, 2, k), t_list(a));
+	}
+	if (tok_is(name, "fold")) {
+		obj_type *a = tvar("a"), *b = tvar("b");
+		obj_type **cbk = a_alloc(2 * sizeof *cbk);
+		cbk[0] = b; cbk[1] = a;
+		obj_type **k = a_alloc(3 * sizeof *k);
+		k[0] = t_list(a); k[1] = b; k[2] = t_functor(t_compound(RET_TUPLE, 2, cbk), b);
+		return t_functor(t_compound(RET_TUPLE, 3, k), b);
+	}
+	if (tok_is(name, "flatten")) {
+		obj_type *a = tvar("a");
+		return t_functor(t_list(t_list(a)), t_list(a));
+	}
+	if (tok_is(name, "concat")) {
+		obj_type *a = tvar("a");
+		return t_functor(t_variadic(t_list(a)), t_list(a));
+	}
+	if (tok_is(name, "cat")) {
+		return t_functor(t_variadic(t_new(RET_STRING)), t_new(RET_STRING));
+	}
+	if (tok_is(name, "run")) {
+		return t_functor(t_variadic(t_new(RET_COMMAND)), t_new(RET_NONE));
+	}
+	if (tok_is(name, "stale")) {
+		obj_type **k = a_alloc(2 * sizeof *k);
+		k[0] = t_file(); k[1] = t_variadic(t_file());
+		return t_functor(t_compound(RET_TUPLE, 2, k), t_new(RET_BOOL));
+	}
+	if (tok_is(name, "sum") || tok_is(name, "min") || tok_is(name, "max")) {
+		return t_functor(t_variadic(t_new(RET_INT)), t_new(RET_INT));
+	}
+	if (tok_is(name, "flag")) {
+		return t_functor(t_variadic(t_new(RET_STRING)), t_new(RET_BOOL));
+	}
+	if (tok_is(name, "first") || tok_is(name, "last")) {
+		obj_type *a = tvar("a");
+		return t_functor(t_list(a), a);
+	}
+	if (tok_is(name, "take") || tok_is(name, "drop")) {
+		obj_type *a = tvar("a");
+		obj_type **k = a_alloc(2 * sizeof *k);
+		k[0] = t_list(a); k[1] = t_new(RET_INT);
+		return t_functor(t_compound(RET_TUPLE, 2, k), t_list(a));
+	}
+	if (tok_is(name, "sort") || tok_is(name, "unique") || tok_is(name, "reverse")) {
+		obj_type *a = tvar("a");
+		return t_functor(t_list(a), t_list(a));
+	}
+	if (tok_is(name, "slice")) {
+		obj_type *a = tvar("a");
+		obj_type **k = a_alloc(3 * sizeof *k);
+		k[0] = t_list(a); k[1] = t_new(RET_INT); k[2] = t_new(RET_INT);
+		return t_functor(t_compound(RET_TUPLE, 3, k), t_list(a));
+	}
+	if (tok_is(name, "index")) {
+		obj_type *a = tvar("a"), *b = tvar("b");
+		obj_type **k = a_alloc(2 * sizeof *k);
+		k[0] = t_list(a); k[1] = b;
+		return t_functor(t_compound(RET_TUPLE, 2, k), t_new(RET_INT));
+	}
+	if (tok_is(name, "count")) {
+		obj_type *a = tvar("a");
+		obj_type **k = a_alloc(2 * sizeof *k);
+		k[0] = t_list(a); k[1] = a;
+		return t_functor(t_compound(RET_TUPLE, 2, k), t_new(RET_INT));
+	}
+	return NULL;
+}
+
+static obj_type *infer_call_impl(ast *node, scope *sc) {
 	ast *callee = node->kids[0];
 
 	/* always visit every argument so errors inside them surface */
@@ -478,48 +616,19 @@ static obj_type *infer_call(ast *node, scope *sc) {
 	if (callee->kind == AST_ID) {
 		/* arity check for builtins: -1 max means variadic. A bad arg count
 		 * would otherwise read past node->kids at run time (segfault). */
-		static const struct { const char *name; int min, max; } arity[] = {
-			{"glob",1,1}, {"subst",3,3}, {"stale",1,-1}, {"zip",2,-1},
-			{"env",1,1}, {"shell",1,1}, {"which",1,1}, {"exists",1,1},
-			{"mkdir",1,1}, {"read",1,1}, {"write",2,2},
-			{"move",2,2}, {"copy",2,2}, {"symlink",2,2}, {"remove",1,1},
-			{"touch",1,1}, {"is_dir",1,1}, {"is_file",1,1},
-			{"filter",2,2}, {"contains",2,2}, {"flatten",1,1}, {"concat",0,-1},
-			{"fold",3,3}, {"length",1,1}, {"first",1,1}, {"last",1,1},
-			{"take",2,2}, {"drop",2,2}, {"sort",1,1}, {"unique",1,1},
-			{"join",2,2}, {"split",2,2}, {"replace",3,3},
-			{"cat",0,-1}, {"upper",1,1}, {"lower",1,1}, {"trim",1,1},
-			{"starts_with",2,2}, {"ends_with",2,2},
-			{"capitalize",1,1}, {"title",1,1}, {"lstrip",1,1}, {"rstrip",1,1},
-			{"strip_prefix",2,2}, {"strip_suffix",2,2},
-			{"pad_left",2,3}, {"pad_right",2,3}, {"center",2,3},
-			{"parent",1,1}, {"name",1,1}, {"stem",1,1}, {"suffix",1,1},
-			{"with_suffix",2,2}, {"with_name",2,2}, {"path",0,-1}, {"abs",1,1},
-			{"run",1,-1}, {"print",0,-1}, {"debug",0,-1},
-			{"json_parse",1,1}, {"json_read",1,1}, {"json_str",1,1},
-			{"json_pretty",1,1}, {"json_write",2,2},
-			{"get",2,2}, {"has",2,2},
-			{"keys",1,1}, {"values",1,1}, {"items",1,1},
-			{"range",1,2}, {"enumerate",1,1}, {"slice",3,3}, {"index",2,3},
-			{"reverse",1,1}, {"sum",1,-1}, {"min",1,-1}, {"max",1,-1},
-			{"count",2,2}, {"find",2,3}, {"to_int",1,1}, {"to_str",1,1}, {"to_float",1,1},
-			{"repeat",2,2}, {"chars",1,1},
-			{"clock",0,0}, {"time",0,0}, {"sleep",1,1}, {"bench",2,2},
-			{"config",1,1}, {"flag",1,-1}, {"opt",2,2}, {"positionals",0,0},
-		};
-		for (size_t i = 0; i < sizeof arity / sizeof arity[0]; i++) {
-			if (!tok_is(callee->tok, arity[i].name)) continue;
-			int mn = arity[i].min, mx = arity[i].max;
+		for (size_t i = 0; i < N_CORE_ARITY; i++) {
+			if (!tok_is(callee->tok, g_core_arity[i].name)) continue;
+			int mn = g_core_arity[i].min, mx = g_core_arity[i].max;
 			if ((int)na < mn || (mx >= 0 && (int)na > mx)) {
 				if (mx < 0)
 					type_err(callee->tok, "%s expects at least %d argument%s, got %zu",
-					         arity[i].name, mn, mn == 1 ? "" : "s", na);
+					         g_core_arity[i].name, mn, mn == 1 ? "" : "s", na);
 				else if (mn == mx)
 					type_err(callee->tok, "%s expects %d argument%s, got %zu",
-					         arity[i].name, mn, mn == 1 ? "" : "s", na);
+					         g_core_arity[i].name, mn, mn == 1 ? "" : "s", na);
 				else
 					type_err(callee->tok, "%s expects %d to %d arguments, got %zu",
-					         arity[i].name, mn, mx, na);
+					         g_core_arity[i].name, mn, mx, na);
 			}
 			break;
 		}
@@ -717,6 +826,72 @@ static obj_type *infer_call(ast *node, scope *sc) {
 	return t_new(RET_VAR);
 }
 
+static obj_type *infer_call(ast *node, scope *sc) {
+	ast *callee = node->kids[0];
+	obj_type *result = infer_call_impl(node, sc);
+
+	/* A builtin callee (the core name-match chain above, or a registered
+	 * host/plugin builtin) is dispatched via early returns that never reach
+	 * the "user function value" callee->type = ft annotation -- so without
+	 * this, hovering e.g. "zip" or "print" directly shows a bare "?" even
+	 * though the call itself infers fine. Annotate uniformly here instead:
+	 * whatever arity is known (the core table, else the registry) for the
+	 * param shape, this call's own already-computed result for the return
+	 * type. Only steps in when there's nothing more specific already --
+	 * NULL (the common case above), or a bare RET_VAR: a builtin that's
+	 * documented (g_core_arity/is_builtin_name) but not name-matched in
+	 * infer_call_impl's dispatch AND not currently registered (e.g. a
+	 * plugin-provided name like take/drop when that plugin isn't loaded)
+	 * falls through infer_id to the generic "user function value" path,
+	 * which sets callee->type to a bare RET_VAR -- worth upgrading too. */
+	if (callee->kind == AST_ID && (!callee->type || callee->type->ret == RET_VAR)) {
+		obj_type *generic = core_generic_signature(callee->tok);
+		if (generic) {
+			/* a curated signature is a complete, self-consistent generic
+			 * description on its own (e.g. filter's List<a> result already
+			 * shares "a" with its List<a> param) -- use it as-is rather than
+			 * grafting on `result`, which without a real call site is just
+			 * whatever the plain dispatch above defaulted to, strictly less
+			 * informative than the curated shape. */
+			callee->type = generic;
+		} else {
+			int mn = -1, mx = -1;
+			for (size_t i = 0; i < N_CORE_ARITY; i++)
+				if (tok_is(callee->tok, g_core_arity[i].name)) {
+					mn = g_core_arity[i].min; mx = g_core_arity[i].max;
+					break;
+				}
+			if (mn < 0) {
+				const fb_Reg *rg = fb_reg_findn(callee->tok->string, callee->tok->len);
+				if (rg) { mn = rg->min; mx = rg->max; }
+			}
+			if (mn >= 0) {
+				obj_type *param;
+				if (mx < 0) {
+					/* variadic (max<0): `mn` fixed "?" slots (none if
+					 * mn==0) followed by a trailing "*?" absorbing the
+					 * rest -- same "*" a capture param's own generic slot
+					 * uses (infer_param_type_from_usage), since this is
+					 * the same shape: zero or more of an unknown type. */
+					if (mn == 0) {
+						param = t_variadic(t_new(RET_VAR));
+					} else {
+						obj_type **k = a_alloc(((size_t)mn + 1) * sizeof *k);
+						for (int j = 0; j < mn; j++) k[j] = t_new(RET_VAR);
+						k[mn] = t_variadic(t_new(RET_VAR));
+						param = t_compound(RET_TUPLE, (size_t)mn + 1, k);
+					}
+				} else {
+					size_t n = (size_t)mx;
+					param = n <= 1 ? t_new(RET_VAR) : tuple_of_n_var(n);
+				}
+				callee->type = t_functor(param, result);
+			}
+		}
+	}
+	return result;
+}
+
 static obj_type *tuple_of_n_var(size_t n) {
 	obj_type **k = a_alloc(n * sizeof *k);
 	for (size_t i = 0; i < n; i++)
@@ -766,16 +941,28 @@ static int param_is_splatted(ast *node, token *name) {
 	return 0;
 }
 
+/* a display-only "*T" (zero or more T) marker -- see obj_type.is_variadic */
+static obj_type *t_variadic(obj_type *elem) {
+	obj_type *t = t_list(elem);
+	t->is_variadic = 1;
+	return t;
+}
+
 /* A standalone lambda's own params have no call site to type them from, so
  * they default to "?" (RET_VAR) -- except:
+ *   - a capture param (@rest) structurally *is* "zero or more of whatever
+ *     follows", regardless of how the body uses it, so it always shows as
+ *     "*?" instead of a bare "?".
  *   - if the body calls a param as a function (`f(...)`), that param is
  *     evidently itself a function, so show it as a functor of that call's
  *     arity instead of a bare "?".
  *   - if the body ever spreads a param (`...s`), it's evidently a sequence,
  *     so show it as List<?> instead of a bare "?".
- * Narrow, syntactic, single-purpose (these two usage shapes only) -- not a
+ * Narrow, syntactic, single-purpose (these usage shapes only) -- not a
  * general unification solver. */
 static obj_type *infer_param_type_from_usage(ast *p, ast *body) {
+	if (p->kind == AST_CAPTURE)
+		return t_variadic(t_new(RET_VAR));
 	token *name = param_name_tok(p);
 	if (name) {
 		int arity = param_call_arity(body, name);
@@ -903,6 +1090,36 @@ static obj_type *infer_apply(ast *fn, obj_type *arg, scope *sc) {
  * argument types, and (if `callee` is non-NULL, i.e. this call was reached
  * via a named/aliased AST_ID callee) annotate that callee node's own hover
  * type from the specialized param bindings, not just the call's result. */
+/* structural equality (same shape, not just same top-level kind) -- used
+ * only to decide whether a specialized capture param's bound values are
+ * uniform enough to collapse into "*T", see collapse_variadic. */
+static int types_structurally_equal(obj_type *a, obj_type *b) {
+	if (a == b) return 1;
+	if (!a || !b) return 0;
+	if (a->ret != b->ret) return 0;
+	if (a->ret == RET_OBJECT)
+		return a->class_name == b->class_name
+		    || (a->class_name && b->class_name && tok_eq(a->class_name, b->class_name));
+	if (a->nchildren != b->nchildren) return 0;
+	for (size_t i = 0; i < a->nchildren; i++)
+		if (!types_structurally_equal(a->children[i], b->children[i])) return 0;
+	return 1;
+}
+
+/* A specialized capture param is bound to a real Tuple<...> (the actual
+ * trailing args at this call site, see bind_params_lam's AST_CAPTURE case).
+ * If every element turned out the same type, "*T" (zero or more T) reads
+ * better than spelling out "Tuple<T, T, T>" -- but only then: a genuinely
+ * mixed tail (Tuple<String, Command>) is kept as an explicit tuple, since
+ * "*" would misrepresent it as uniform. Non-tuples (already collapsed, or
+ * the "no call site" placeholder) and empty tuples pass through unchanged. */
+static obj_type *collapse_variadic(obj_type *t) {
+	if (!t || t->ret != RET_TUPLE || t->nchildren == 0) return t;
+	for (size_t i = 1; i < t->nchildren; i++)
+		if (!types_structurally_equal(t->children[0], t->children[i])) return t;
+	return t_variadic(t->children[0]);
+}
+
 static obj_type *specialize_call(ast *node, size_t na, obj_type *a0, obj_type *a1,
                                   scope *sc, ast *lam, ast *callee) {
 	/* one type per syntactic argument (a0/a1 already computed by the caller) */
@@ -980,7 +1197,7 @@ static obj_type *specialize_call(ast *node, size_t na, obj_type *a0, obj_type *a
 				ast *p = plist->kids[i];
 				ast *p_lam = (i < total) ? arg_lams[i] : NULL;
 				pk[i] = p_lam ? p_lam->type
-				     : (p->kind == AST_CAPTURE && p->nkids) ? p->kids[0]->type : p->type;
+				     : (p->kind == AST_CAPTURE && p->nkids) ? collapse_variadic(p->kids[0]->type) : p->type;
 			}
 			callee->type = t_functor(PP == 1 ? pk[0] : t_compound(RET_TUPLE, PP, pk), result);
 		}
@@ -1311,7 +1528,7 @@ void obj_type_print(obj_type *t) {
 	case RET_BOOL:    printf("Bool");    break;
 	case RET_FILE:    printf("File");    break;   /* fields are standard */
 	case RET_COMMAND: printf("Command"); break;
-	case RET_VAR:     printf("?");       break;
+	case RET_VAR:     printf("%s", t->var_label ? t->var_label : "?"); break;
 
 	case RET_OBJECT:
 		if (t->class_name) printf("%.*s", (int)t->class_name->len, t->class_name->string);
@@ -1319,9 +1536,14 @@ void obj_type_print(obj_type *t) {
 		break;
 
 	case RET_LIST:
-		printf("List<");
-		obj_type_print(t->nchildren ? t->children[0] : NULL);
-		printf(">");
+		if (t->is_variadic) {
+			printf("*");
+			obj_type_print(t->nchildren ? t->children[0] : NULL);
+		} else {
+			printf("List<");
+			obj_type_print(t->nchildren ? t->children[0] : NULL);
+			printf(">");
+		}
 		break;
 
 	case RET_TUPLE:
@@ -1663,15 +1885,20 @@ static void obj_type_sprint_into(obj_type *t, char *buf, size_t bufsz, size_t *p
 	case RET_BOOL:    APPEND("Bool");    break;
 	case RET_FILE:    APPEND("File");    break;
 	case RET_COMMAND: APPEND("Command"); break;
-	case RET_VAR:     APPEND("?");       break;
+	case RET_VAR:     APPEND("%s", t->var_label ? t->var_label : "?"); break;
 	case RET_OBJECT:
 		if (t->class_name) APPEND("%.*s", (int)t->class_name->len, t->class_name->string);
 		else                APPEND("Object");
 		break;
 	case RET_LIST:
-		APPEND("List<");
-		obj_type_sprint_into(t->nchildren ? t->children[0] : NULL, buf, bufsz, pos);
-		APPEND(">");
+		if (t->is_variadic) {
+			APPEND("*");
+			obj_type_sprint_into(t->nchildren ? t->children[0] : NULL, buf, bufsz, pos);
+		} else {
+			APPEND("List<");
+			obj_type_sprint_into(t->nchildren ? t->children[0] : NULL, buf, bufsz, pos);
+			APPEND(">");
+		}
 		break;
 	case RET_TUPLE:
 		APPEND("Tuple<");

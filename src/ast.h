@@ -93,6 +93,20 @@ typedef struct obj_type {
 	token           **fields;   /* record (RET_FILE) field names, parallel
 	                             * to children; NULL for non-records       */
 	token            *class_name;   /* RET_OBJECT only: the `type NAME(...)` name */
+	const char       *var_label;    /* RET_VAR only: cosmetic display name ("a",
+	                                 * "b", ...) for a hand-written generic
+	                                 * builtin signature -- purely for hover
+	                                 * (walk.c's core_generic_signature), never
+	                                 * consulted by inference/unify; the SAME
+	                                 * obj_type* reused at every occurrence of
+	                                 * one type variable in one signature is
+	                                 * what makes them print as the same label */
+	int               is_variadic;  /* RET_LIST only: display-only marker for a
+	                                 * capture (@rest) param's slot -- prints as
+	                                 * "*T" (T = the element type) instead of
+	                                 * "List<T>", to read as "zero or more T"
+	                                 * distinctly from an ordinary List-typed
+	                                 * param. Never consulted by inference. */
 } obj_type;
 
 typedef struct ast {

@@ -13,7 +13,7 @@ opts = Parser<{
 	"commands": { "type": "bool", "long": "--compile-commands", "help": "write compile_commands.json" },
 	"jobs":     { "type": "int", "short": "-j", "default": _ -> to_int(shell(`nproc`)), "help": "parallel compile jobs (-j N, default nproc)" },
 	"bench":    { "type": "bool", "help": "print build timing (needs --bench)" },
-	"quiet":    { "type": "bool", "short": "-q", "help": "quit mode" },
+	"quiet":    { "type": "bool", "short": "-q", "help": "quiet mode" },
 }>
 
 config({ "jobs": opts.jobs, "silent": opts.quiet })
@@ -26,7 +26,7 @@ EXE    = [fbuild]
 SRCS   = filter(glob([src/*.c]), f -> name(f) != 'main_lspd.c')
 OBJS   = SRCS |> f -> path([build], cat(stem(f), '.o'))
 HDRS   = concat(glob([src/*.h]), glob([cds-lib/cds_lib/*.h]), glob([cds-lib/*.h]), glob([cds-lib/*.c]))
-CC     = 'cc'
+CC     = 'gcc'
 CFLAGS = '-ggdb', '-Icds-lib', '-Wall', '-Wextra', '-O2', '-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0'
 log    = l, m -> print(cat('[', l, '] ', m))
 
@@ -66,8 +66,12 @@ lspd_exe = create_cmd(link, EXED, concat(LIB_OBJS, LSPD_OBJ))
 
 
 main = (objs >> exe)
+lsp = objs >> lspd_obj >> lspd_exe
 
-(run(objs >> lspd_obj >> lspd_exe), log("INFO", "fbuildd built")) when contains(TARGETS, 'fbuildd')
+(run(lsp), log("INFO", "fbuildd built")) when
+	(contains(TARGETS, 'fbuildd') or contains(TARGETS, 'all'))
+and (FORCE or stale(EXED, ...LSPD_OBJ, ...LSPD_SRC, ...SRCS, ...OBJS, ...HDRS))
+
 log("INFO", "{EXE} up to date") when not (
 	bench('build', run(main)) when (contains(TARGETS, 'all') or length(TARGETS) == 0) and (FORCE or stale(EXE, ...SRCS, ...OBJS, ...HDRS))
 ) when not contains(TARGETS, 'install')
