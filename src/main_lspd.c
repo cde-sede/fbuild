@@ -603,11 +603,42 @@ static long line_col_offset(const char *text, int line1, int col1) {
  * identifier, or it belongs to a list/map literal instead). Only a rough
  * heuristic for string-literal contents, same spirit as the dangling-dot
  * detector -- good enough for the common case, not exhaustive. */
+/* Marks every byte of `text` that falls inside a '...'/"..." string literal
+ * (funcbuild strings: backslash-escaped, don't span lines -- SYNTAX.md), so
+ * find_call_context's bracket/comma scan can skip them. Without this, a
+ * literal "]" or "," inside a string (e.g. cat('[', l, '] ', m)) is
+ * indistinguishable from real syntax and corrupts the depth/comma count.
+ * A "{ expr }" string interpolation is treated as opaque string content
+ * too (not specially unmasked) -- a cursor inside one would need its own
+ * nested scan, out of scope for this best-effort heuristic. Caller frees
+ * the returned buffer. */
+static char *mask_strings(const char *text, size_t len) {
+	char *in_str = malloc(len);
+	int q = 0;
+	for (size_t i = 0; i < len; i++) {
+		char c = text[i];
+		if (c == '\n') { q = 0; in_str[i] = 0; continue; }
+		if (q) {
+			in_str[i] = 1;
+			if (c == '\\' && i + 1 < len) { in_str[++i] = 1; continue; }
+			if (c == q) q = 0;
+			continue;
+		}
+		if (c == '\'' || c == '"') { q = c; in_str[i] = 1; continue; }
+		in_str[i] = 0;
+	}
+	return in_str;
+}
+
 static int find_call_context(const char *text, long pos, const char **out_callee,
                               size_t *out_callee_len, int *out_active) {
+	size_t len = strlen(text);
+	char *in_str = mask_strings(text, len);
 	int depth = 0;
 	int active = 0;
+	int found = 0;
 	for (long i = pos - 1; i >= 0; i--) {
+		if (in_str[i]) continue;
 		char c = text[i];
 		if (c == ')' || c == ']' || c == '}') { depth++; continue; }
 		if (c == '(') {
@@ -617,19 +648,21 @@ static int find_call_context(const char *text, long pos, const char **out_callee
 			long end = j + 1;
 			while (j >= 0 && (isalnum((unsigned char)text[j]) || text[j] == '_')) j--;
 			long start = j + 1;
-			if (start >= end) return 0;   /* nothing identifier-like before '(' */
+			if (start >= end) break;   /* nothing identifier-like before '(' */
 			*out_callee = text + start;
 			*out_callee_len = (size_t)(end - start);
 			*out_active = active;
-			return 1;
+			found = 1;
+			break;
 		}
 		if (c == '[' || c == '{') {
 			if (depth > 0) { depth--; continue; }
-			return 0;   /* enclosed by a list/map literal, not a call */
+			break;   /* enclosed by a list/map literal, not a call */
 		}
 		if (c == ',' && depth == 0) active++;
 	}
-	return 0;
+	free(in_str);
+	return found;
 }
 
 static void handle_signature_help(jval *id, jval *params) {
