@@ -6,9 +6,11 @@
  * separate hand-maintained grammar.
  *
  * v1 scope: textDocument/{didOpen,didChange,didClose,hover,definition,
- * completion}, publishDiagnostics. Completion is bare-identifier only (no
- * dot-triggered field/method completion -- the parser has no error
- * recovery, so "obj." doesn't parse).
+ * documentSymbol,completion}, publishDiagnostics. Completion covers bare identifiers
+ * (builtins/top-level defs/locals) and base.field/method access -- the
+ * latter needs a placeholder-splice trick for a bare trailing "base."
+ * (nothing typed after the dot yet), since the parser has no error
+ * recovery and that's otherwise a syntax error; see handle_completion.
  *
  * Nothing but framed JSON-RPC messages may go to stdout; anything else
  * (errors, notices) goes to stderr. */
@@ -362,6 +364,8 @@ typedef struct {
 	char     *uri;
 	fb_State *S;       /* recreated on every open/change, see doc_recheck */
 	ast      *prog;    /* NULL if the last check hit a syntax error */
+	char     *text;    /* raw source of the last check -- for the completion
+	                    * dangling-dot splice fallback, see handle_completion */
 	fb_Diag   diags[MAX_DIAGS];
 	int       ndiags;
 } fb_Doc;
@@ -390,6 +394,7 @@ static void doc_close(const char *uri) {
 		if (!strcmp(g_docs[i].uri, uri)) {
 			if (g_docs[i].S) fb_close(g_docs[i].S);
 			free(g_docs[i].uri);
+			free(g_docs[i].text);
 			g_docs[i] = g_docs[--g_ndocs];
 			return;
 		}
@@ -404,6 +409,8 @@ static void doc_recheck(fb_Doc *d, const char *text) {
 	d->S = fb_new();
 	load_workspace_plugins(d->S);
 	d->prog = NULL;
+	free(d->text);
+	d->text = strdup(text);
 	int n = fb_check(d->S, text, d->uri, d->diags, MAX_DIAGS, &d->prog);
 	d->ndiags = n < 0 ? 0 : (n > MAX_DIAGS ? MAX_DIAGS : n);
 }
@@ -455,6 +462,7 @@ static void handle_initialize(jval *id, jval *params) {
 	send_result(id,
 		"{\"capabilities\":{\"textDocumentSync\":1,"
 		"\"hoverProvider\":true,\"definitionProvider\":true,"
+		"\"documentSymbolProvider\":true,"
 		"\"completionProvider\":{}}}");
 }
 
@@ -495,6 +503,75 @@ static void handle_did_close(jval *params) {
 	doc_close(uri);
 }
 
+static const char *COMPLETE_PLACEHOLDER = "__fbcomplete__";
+
+/* Is the '.' at byte offset `dot_off` in `text` "dangling" -- nothing
+ * parseable directly after it (no identifier/digit/"{")? Also requires the
+ * dot to follow something that looks like the end of an expression
+ * (identifier/close-bracket char), to avoid mistaking e.g. a bare "." on
+ * its own line for a receiver. This is exactly the shape parse_field
+ * (build_system.c) rejects -- it requires TOK_ID/TOK_INT/TOK_LBRACE right
+ * after the dot -- which is why the whole document fails to parse with no
+ * partial AST salvaged the moment a user types "base." and pauses. */
+static int is_dangling_dot(const char *text, long dot_off) {
+	char before = dot_off > 0 ? text[dot_off - 1] : 0;
+	if (!(isalnum((unsigned char)before) || before == '_' ||
+	      before == ')' || before == ']' || before == '}'))
+		return 0;
+	char after = text[dot_off + 1];
+	if (!after) return 1;
+	return !(isalnum((unsigned char)after) || after == '_' || after == '{');
+}
+
+/* Splice a placeholder identifier immediately after every dangling dot in
+ * `text` (see is_dangling_dot) so the whole document parses even mid-edit.
+ * Every byte before an insertion point is unchanged, so a line/col derived
+ * from the original text still lands on the same source position in the
+ * spliced text. Returns NULL if there were no dangling dots (nothing to
+ * recover). */
+static char *splice_dangling_dots(const char *text) {
+	size_t tl = strlen(text), pl = strlen(COMPLETE_PLACEHOLDER);
+	int count = 0;
+	for (size_t i = 0; text[i]; i++)
+		if (text[i] == '.' && is_dangling_dot(text, (long)i)) count++;
+	if (!count) return NULL;
+	char *out = malloc(tl + (size_t)count * pl + 1);
+	size_t len = 0;
+	for (size_t i = 0; text[i]; i++) {
+		out[len++] = text[i];
+		if (text[i] == '.' && is_dangling_dot(text, (long)i)) {
+			memcpy(out + len, COMPLETE_PLACEHOLDER, pl);
+			len += pl;
+		}
+	}
+	out[len] = 0;
+	return out;
+}
+
+/* If `d`'s last check hit a syntax error (d->prog == NULL) purely because
+ * of one or more dangling dots -- the classic mid-typing "base." state --
+ * recover a usable ast by splicing placeholders and rechecking in a
+ * throwaway fb_State. Returns NULL (leaving *out_scratch untouched) if
+ * d->prog is already set, there's no text, no dangling dot was found, or
+ * the spliced text still doesn't parse cleanly (some other error present
+ * too). On success, `*out_scratch` is set to the owning fb_State: the
+ * caller must finish using the returned ast (serialize any response)
+ * BEFORE calling fb_close(*out_scratch), and must close it exactly once. */
+static ast *recover_prog(fb_Doc *d, fb_State **out_scratch) {
+	if (d->prog || !d->text) return NULL;
+	char *spliced = splice_dangling_dots(d->text);
+	if (!spliced) return NULL;
+	fb_State *scratch = fb_new();
+	load_workspace_plugins(scratch);
+	ast *prog2 = NULL;
+	fb_Diag tmp[1];
+	fb_check(scratch, spliced, d->uri, tmp, 1, &prog2);
+	free(spliced);
+	if (!prog2) { fb_close(scratch); return NULL; }
+	*out_scratch = scratch;
+	return prog2;
+}
+
 static void handle_hover(jval *id, jval *params) {
 	jval *td = jget(params, "textDocument");
 	jval *pos = jget(params, "position");
@@ -502,18 +579,30 @@ static void handle_hover(jval *id, jval *params) {
 	int line = jint(jget(pos, "line"), 0) + 1;
 	int col  = jint(jget(pos, "character"), 0) + 1;
 	fb_Doc *d = uri ? doc_find(uri) : NULL;
-	if (!d || !d->prog) { send_result(id, "null"); return; }   /* syntax-broken: no tree to hover into */
+	if (!d) { send_result(id, "null"); return; }
+
+	/* d->prog may be NULL (syntax-broken, e.g. the classic mid-typing
+	 * "base." state) -- recover_prog salvages a usable ast when that's the
+	 * only thing wrong. Still null (unrecoverable or no text at all) means
+	 * there's truly no tree to hover into. */
+	fb_State *scratch = NULL;
+	ast *prog = d->prog ? d->prog : recover_prog(d, &scratch);
+	if (!prog) { send_result(id, "null"); return; }
 
 	fb_HoverInfo hi;
-	if (!fb_hover_at(d->prog, line, col, &hi)) { send_result(id, "null"); return; }
-
-	dbuf b; dbuf_init(&b);
-	dbuf_puts(&b, "{\"contents\":{\"kind\":\"plaintext\",\"value\":");
-	dbuf_putjstr(&b, hi.text);
-	dbuf_putf(&b, "},\"range\":{\"start\":{\"line\":%d,\"character\":%d},\"end\":{\"line\":%d,\"character\":%d}}}",
-	           z(hi.span.start.line), z(hi.span.start.col), z(hi.span.end.line), z(hi.span.end.col));
-	send_result(id, b.buf);
-	free(b.buf);
+	int ok = fb_hover_at(prog, line, col, &hi);
+	if (ok) {
+		dbuf b; dbuf_init(&b);
+		dbuf_puts(&b, "{\"contents\":{\"kind\":\"plaintext\",\"value\":");
+		dbuf_putjstr(&b, hi.text);
+		dbuf_putf(&b, "},\"range\":{\"start\":{\"line\":%d,\"character\":%d},\"end\":{\"line\":%d,\"character\":%d}}}",
+		           z(hi.span.start.line), z(hi.span.start.col), z(hi.span.end.line), z(hi.span.end.col));
+		send_result(id, b.buf);
+		free(b.buf);
+	} else {
+		send_result(id, "null");
+	}
+	if (scratch) fb_close(scratch);
 }
 
 static void handle_definition(jval *id, jval *params) {
@@ -523,11 +612,15 @@ static void handle_definition(jval *id, jval *params) {
 	int line = jint(jget(pos, "line"), 0) + 1;
 	int col  = jint(jget(pos, "character"), 0) + 1;
 	fb_Doc *d = uri ? doc_find(uri) : NULL;
-	if (!d || !d->prog) { send_result(id, "null"); return; }
+	if (!d) { send_result(id, "null"); return; }
+
+	fb_State *scratch = NULL;
+	ast *prog = d->prog ? d->prog : recover_prog(d, &scratch);
+	if (!prog) { send_result(id, "null"); return; }
 
 	fb_Definition defs[16];
-	int n = fb_find_definition(d->prog, line, col, defs, 16);
-	if (n <= 0) { send_result(id, "null"); return; }
+	int n = fb_find_definition(prog, line, col, defs, 16);
+	if (n <= 0) { send_result(id, "null"); if (scratch) fb_close(scratch); return; }
 
 	dbuf b; dbuf_init(&b);
 	if (n > 1) dbuf_puts(&b, "[");
@@ -541,29 +634,67 @@ static void handle_definition(jval *id, jval *params) {
 	}
 	if (n > 1) dbuf_puts(&b, "]");
 	send_result(id, b.buf);
+	if (scratch) fb_close(scratch);
 	free(b.buf);
 }
 
-static void handle_completion(jval *id, jval *params) {
+static void handle_document_symbol(jval *id, jval *params) {
 	jval *td = jget(params, "textDocument");
-	jval *pos = jget(params, "position");
 	const char *uri = jstr(jget(td, "uri"));
-	int line = jint(jget(pos, "line"), 0) + 1;
-	int col  = jint(jget(pos, "character"), 0) + 1;
 	fb_Doc *d = uri ? doc_find(uri) : NULL;
 	if (!d) { send_result(id, "[]"); return; }
 
-	static fb_CompItem items[512];
-	/* d->prog may be NULL (last check was a syntax error) -- fb_complete_at
-	 * degrades gracefully, still returning the builtin tier. */
-	int n = fb_complete_at(d->prog, line, col, items, 512);
+	fb_State *scratch = NULL;
+	ast *prog = d->prog ? d->prog : recover_prog(d, &scratch);
+	if (!prog) { send_result(id, "[]"); return; }
+
+	static fb_DocSymbol syms[1024];
+	int n = fb_document_symbols(prog, syms, 1024);
 
 	dbuf b; dbuf_init(&b);
 	dbuf_puts(&b, "[");
 	for (int i = 0; i < n; i++) {
 		if (i) dbuf_puts(&b, ",");
-		/* LSP CompletionItemKind: 3 = Function, 6 = Variable */
-		int kind = (items[i].kind == FB_COMP_BUILTIN || items[i].kind == FB_COMP_TOPLEVEL_FN) ? 3 : 6;
+		/* LSP SymbolKind: 5 = Class, 6 = Method, 12 = Function, 13 = Variable */
+		int kind;
+		switch (syms[i].kind) {
+		case FB_SYM_CLASS:    kind = 5;  break;
+		case FB_SYM_METHOD:   kind = 6;  break;
+		case FB_SYM_FUNCTION: kind = 12; break;
+		default:              kind = 13; break;
+		}
+		dbuf_puts(&b, "{\"name\":");
+		dbuf_putjstr(&b, syms[i].name);
+		dbuf_putf(&b, ",\"kind\":%d,\"location\":{\"uri\":", kind);
+		dbuf_putjstr(&b, uri);
+		dbuf_putf(&b, ",\"range\":{\"start\":{\"line\":%d,\"character\":%d},\"end\":{\"line\":%d,\"character\":%d}}}",
+		           z(syms[i].span.start.line), z(syms[i].span.start.col),
+		           z(syms[i].span.end.line),   z(syms[i].span.end.col));
+		if (syms[i].container) {
+			dbuf_puts(&b, ",\"containerName\":");
+			dbuf_putjstr(&b, syms[i].container);
+		}
+		dbuf_puts(&b, "}");
+	}
+	dbuf_puts(&b, "]");
+	send_result(id, b.buf);
+	if (scratch) fb_close(scratch);
+	free(b.buf);
+}
+
+static void send_completion_items(jval *id, fb_CompItem *items, int n) {
+	dbuf b; dbuf_init(&b);
+	dbuf_puts(&b, "[");
+	for (int i = 0; i < n; i++) {
+		if (i) dbuf_puts(&b, ",");
+		/* LSP CompletionItemKind: 3 = Function, 5 = Field, 6 = Variable */
+		int kind;
+		switch (items[i].kind) {
+		case FB_COMP_BUILTIN:
+		case FB_COMP_TOPLEVEL_FN: kind = 3; break;
+		case FB_COMP_FIELD:       kind = 5; break;
+		default:                  kind = 6; break;
+		}
 		dbuf_puts(&b, "{\"label\":");
 		dbuf_putjstr(&b, items[i].name);
 		dbuf_putf(&b, ",\"kind\":%d", kind);
@@ -576,6 +707,47 @@ static void handle_completion(jval *id, jval *params) {
 	dbuf_puts(&b, "]");
 	send_result(id, b.buf);
 	free(b.buf);
+}
+
+/* Placeholder identifier spliced in right at the cursor for the
+ * dangling-dot fallback below -- must be a syntactically valid bare
+ * identifier, and distinctive enough it'll never collide with anything a
+ * user actually typed. */
+static void handle_completion(jval *id, jval *params) {
+	jval *td = jget(params, "textDocument");
+	jval *pos = jget(params, "position");
+	const char *uri = jstr(jget(td, "uri"));
+	int line = jint(jget(pos, "line"), 0) + 1;
+	int col  = jint(jget(pos, "character"), 0) + 1;
+	fb_Doc *d = uri ? doc_find(uri) : NULL;
+	if (!d) { send_result(id, "[]"); return; }
+
+	static fb_CompItem items[512];
+
+	/* 1. Cursor already sits on a parsed base.field/base.method node
+	 * (e.g. "base.partial<cursor>", which parses fine as-is -- only a
+	 * bare trailing "." with nothing typed after fails to parse). */
+	int n = d->prog ? fb_complete_field_at(d->prog, line, col, items, 512) : -1;
+	if (n >= 0) { send_completion_items(id, items, n); return; }
+
+	/* 2. d->prog may be NULL purely because of a dangling dot (the classic
+	 * mid-typing "base." state) -- recover and retry against the same
+	 * position. Response is fully serialized before `scratch` closes --
+	 * its arena owns every string fb_complete_field_at just handed back. */
+	fb_State *scratch = NULL;
+	ast *prog2 = recover_prog(d, &scratch);
+	if (prog2) {
+		n = fb_complete_field_at(prog2, line, col, items, 512);
+		send_completion_items(id, items, n < 0 ? 0 : n);
+		fb_close(scratch);
+		return;
+	}
+
+	/* 3. Not a field position at all: normal bare-identifier completion.
+	 * d->prog may be NULL (syntax error) -- fb_complete_at degrades
+	 * gracefully, still returning the builtin tier. */
+	n = fb_complete_at(d->prog, line, col, items, 512);
+	send_completion_items(id, items, n);
 }
 
 static void handle_shutdown(jval *id) {
@@ -604,6 +776,7 @@ static void handle_message(const char *body, size_t len) {
 	else if (!strcmp(method, "textDocument/didClose"))    handle_did_close(params);
 	else if (!strcmp(method, "textDocument/hover"))       handle_hover(id, params);
 	else if (!strcmp(method, "textDocument/definition"))  handle_definition(id, params);
+	else if (!strcmp(method, "textDocument/documentSymbol")) handle_document_symbol(id, params);
 	else if (!strcmp(method, "textDocument/completion"))  handle_completion(id, params);
 	else if (!strcmp(method, "shutdown"))                 handle_shutdown(id);
 	else if (!strcmp(method, "exit")) {

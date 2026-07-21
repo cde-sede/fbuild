@@ -2114,3 +2114,83 @@ int fb_complete_at(ast *prog, int line, int col, fb_CompItem *out, int max_out) 
 
 	return n;
 }
+
+/* Field/method candidates for receiver type `base`. Two field-bearing
+ * shapes: RET_FILE records (File<>, standard fields) and RET_OBJECT with
+ * `fields` actually populated (only infer_parser_schema does this today,
+ * for Parser<schema> results -- see walk.c's rec_push calls there). A
+ * RET_OBJECT WITHOUT fields is a `type X(...)` class instance (AST_OBJNEW
+ * never tracks field shapes, see ast.h) -- offer its methods instead,
+ * matched by class name against g_methodsyms (dynamic dispatch, no static
+ * field checking, same resolution infer()'s own AST_FIELD case uses).
+ * Anything else (RET_VAR, a dynamic Map, List, ...) has no statically-known
+ * members: 0 candidates, correctly. */
+static int complete_receiver_fields(obj_type *base, fb_CompItem *out, int max_out) {
+	int n = 0;
+	if (!base) return 0;
+	if ((base->ret == RET_FILE || base->ret == RET_OBJECT) && base->fields) {
+		for (size_t i = 0; i < base->nchildren && n < max_out; i++) {
+			/* NOT tok_str(): File/Parser<schema> field-name tokens (FF_name,
+			 * PS_rest, ...) are process-wide statics shared across every
+			 * fb_State ever created -- tok_str's lazy ->owned cache would
+			 * capture a pointer into whichever fb_State's arena happened to
+			 * call it first, which dangles once that state is fb_close'd.
+			 * A fresh, uncached copy into the CURRENT arena is required. */
+			out[n].name = a_dupn(base->fields[i]->string, base->fields[i]->len);
+			out[n].kind = FB_COMP_FIELD;
+			out[n].detail = base->children[i] ? obj_type_sprint(base->children[i]) : NULL;
+			n++;
+		}
+	} else if (base->ret == RET_OBJECT && base->class_name) {
+		for (int i = 0; i < g_nmethodsyms && n < max_out; i++)
+			if (tok_eq(g_methodsyms[i].class_name, base->class_name)) {
+				out[n].name = tok_str(g_methodsyms[i].method_name);
+				out[n].kind = FB_COMP_TOPLEVEL_FN;
+				out[n].detail = NULL;
+				n++;
+			}
+	}
+	return n;
+}
+
+int fb_complete_field_at(ast *prog, int line, int col, fb_CompItem *out, int max_out) {
+	if (!prog || !out || max_out <= 0) return -1;
+	/* An LSP cursor sits right after the last typed character, i.e. one
+	 * column past a token's own span (find_node/ast_span require the
+	 * position to be ON a covered character, correct for hover but not
+	 * here) -- if the exact position misses, retry one column back before
+	 * giving up. */
+	ast *n = find_node(prog, line, col);
+	if ((!n || n->kind != AST_FIELD) && col > 1)
+		n = find_node(prog, line, col - 1);
+	if (!n || n->kind != AST_FIELD || !n->kids[0]) return -1;
+	collect_symbols(prog);   /* populate g_methodsyms for the RET_OBJECT case */
+	return complete_receiver_fields(n->kids[0]->type, out, max_out);
+}
+
+int fb_document_symbols(ast *prog, fb_DocSymbol *out, int max_out) {
+	if (!prog || !out || max_out <= 0) return 0;
+	collect_symbols(prog);
+	int n = 0;
+	for (int i = 0; i < g_ndefsyms && n < max_out; i++) {
+		ast *rhs = g_defsyms[i].site->kids[0];
+		fb_SymKind kind = FB_SYM_VARIABLE;
+		if (rhs && rhs->kind == AST_LAMBDA) {
+			ast *body = rhs->nkids > 1 ? rhs->kids[1] : NULL;
+			kind = (body && body->kind == AST_OBJNEW) ? FB_SYM_CLASS : FB_SYM_FUNCTION;
+		}
+		out[n].name = tok_str(g_defsyms[i].name);
+		out[n].kind = kind;
+		out[n].span = ast_span(g_defsyms[i].site);
+		out[n].container = NULL;
+		n++;
+	}
+	for (int i = 0; i < g_nmethodsyms && n < max_out; i++) {
+		out[n].name = tok_str(g_methodsyms[i].method_name);
+		out[n].kind = FB_SYM_METHOD;
+		out[n].span = ast_span(g_methodsyms[i].site);
+		out[n].container = tok_str(g_methodsyms[i].class_name);
+		n++;
+	}
+	return n;
+}

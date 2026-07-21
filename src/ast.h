@@ -180,10 +180,11 @@ int fb_hover_at(ast *prog, int line, int col, fb_HoverInfo *out);
  * completion (the parser has no error recovery, so "obj." doesn't parse). */
 
 typedef enum {
-	FB_COMP_BUILTIN     = 0,
+	FB_COMP_BUILTIN      = 0,
 	FB_COMP_TOPLEVEL_FN  = 1,   /* top-level def/method whose RHS is a lambda */
 	FB_COMP_TOPLEVEL_VAR = 2,   /* top-level def whose RHS is a plain value   */
 	FB_COMP_LOCAL        = 3,   /* lambda param / where-binding in scope      */
+	FB_COMP_FIELD        = 4,   /* record field (RET_FILE) of a base.<here>   */
 } fb_CompKind;
 typedef struct {
 	const char *name;    /* NUL-terminated, arena-owned */
@@ -199,6 +200,39 @@ typedef struct {
  * (last parse was a syntax error) -- still returns builtins; the
  * top-level/local tiers just contribute nothing. */
 int fb_complete_at(ast *prog, int line, int col, fb_CompItem *out, int max_out);
+
+/* Field/method candidates for a base.<here> expression at (line, col),
+ * 1-based, in an already-successfully-parsed `prog` -- i.e. "base.partial"
+ * with at least the dot already parsed (a bare trailing "base." with
+ * nothing typed after the dot is a syntax error under this grammar and
+ * won't produce a prog at all; the caller is expected to splice a
+ * placeholder identifier and reparse before calling this, see fbuildd's
+ * handle_completion). Returns -1 if (line, col) isn't a base.field
+ * position at all (caller should fall back to fb_complete_at); returns a
+ * count >= 0 (possibly 0, if the receiver's type has no known
+ * fields/methods, e.g. a dynamic Map) otherwise -- 0 is a real answer, not
+ * "try something else". */
+int fb_complete_field_at(ast *prog, int line, int col, fb_CompItem *out, int max_out);
+
+/* ---- document symbols (walk.c) ------------------------------------------
+ * Outline of every top-level def/method in `prog`, for
+ * textDocument/documentSymbol. */
+
+typedef enum {
+	FB_SYM_FUNCTION = 0,   /* top-level def whose RHS is a lambda           */
+	FB_SYM_VARIABLE = 1,   /* top-level def whose RHS is a plain value      */
+	FB_SYM_CLASS    = 2,   /* `type X(...) = ...` constructor def           */
+	FB_SYM_METHOD   = 3,   /* `method Class.name = ...`                     */
+} fb_SymKind;
+typedef struct {
+	const char *name;        /* NUL-terminated, arena-owned */
+	fb_SymKind  kind;
+	fb_Span     span;        /* the whole def/method statement */
+	const char *container;   /* class name for FB_SYM_METHOD, else NULL */
+} fb_DocSymbol;
+
+/* Writes at most max_out entries into out, returns the count written. */
+int fb_document_symbols(ast *prog, fb_DocSymbol *out, int max_out);
 
 /* executor (run.c). argc/argv are the program's CLI args; args[2..] become
  * the language-level `args` list. */
