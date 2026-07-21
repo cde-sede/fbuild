@@ -234,6 +234,21 @@ typedef struct {
 /* Writes at most max_out entries into out, returns the count written. */
 int fb_document_symbols(ast *prog, fb_DocSymbol *out, int max_out);
 
+/* ---- signature help (walk.c) --------------------------------------------
+ * Not tied to any specific AST node -- callers locate the enclosing call
+ * and active argument index themselves (a text-level scan is enough, no
+ * AST/reparse needed, so this works even mid-typing an unclosed call). */
+
+/* Best-effort functor signature for callee `name` (len bytes, raw text --
+ * not a token). `prog` may be NULL: builtins still resolve; a user-defined
+ * top-level function only resolves if `prog` is set. NULL if unknown. */
+obj_type *fb_lookup_signature(ast *prog, const char *name, size_t len);
+
+/* Individual parameter types of a RET_FUNCTOR (flattening a Tuple-shaped
+ * param slot into one entry per element). Writes at most max_out into out,
+ * returns the count written (0 if `t` isn't RET_FUNCTOR). */
+int fb_functor_params(obj_type *t, obj_type **out, int max_out);
+
 /* executor (run.c). argc/argv are the program's CLI args; args[2..] become
  * the language-level `args` list. */
 void      run_program(ast *prog, int argc, char **argv);

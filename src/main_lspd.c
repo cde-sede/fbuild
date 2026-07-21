@@ -463,7 +463,8 @@ static void handle_initialize(jval *id, jval *params) {
 		"{\"capabilities\":{\"textDocumentSync\":1,"
 		"\"hoverProvider\":true,\"definitionProvider\":true,"
 		"\"documentSymbolProvider\":true,"
-		"\"completionProvider\":{}}}");
+		"\"completionProvider\":{},"
+		"\"signatureHelpProvider\":{\"triggerCharacters\":[\"(\",\",\"]}}}");
 }
 
 static void handle_did_open(jval *params) {
@@ -570,6 +571,111 @@ static ast *recover_prog(fb_Doc *d, fb_State **out_scratch) {
 	if (!prog2) { fb_close(scratch); return NULL; }
 	*out_scratch = scratch;
 	return prog2;
+}
+
+/* Byte offset (0-based) of 1-based (line, col) in `text`. No UTF-16
+ * handling, same ASCII-position assumption the rest of this file already
+ * makes (LSP character offsets are just treated as byte offsets). */
+static long line_col_offset(const char *text, int line1, int col1) {
+	long off = 0;
+	int cur_line = 1;
+	while (cur_line < line1 && text[off]) {
+		if (text[off] == '\n') cur_line++;
+		off++;
+	}
+	return off + (col1 - 1);
+}
+
+/* Scan `text` backward from byte offset `pos` (the cursor) for the nearest
+ * enclosing, still-open '(' -- tracking (), [], {} nesting depth so a
+ * paren inside a nested call/list/map isn't mistaken for the enclosing
+ * one -- counting top-level commas along the way (the active parameter
+ * index). This is deliberately text-level, not AST-based: it works
+ * whether or not the document currently parses at all, which matters here
+ * since the very call being typed is often mid-typing and unclosed (a
+ * syntax error under this grammar's no-recovery parser, same root cause
+ * completion's dangling-dot splice works around -- but splicing a correct
+ * closing paren back in is far more ambiguous than splicing an identifier,
+ * so this sidesteps reparsing entirely instead). Sets *out_callee/
+ * *out_callee_len to the identifier immediately before the matched '(',
+ * and *out_active to the comma count. Returns 0 if no enclosing call is
+ * found (no '(' before `pos`, or it's not immediately preceded by an
+ * identifier, or it belongs to a list/map literal instead). Only a rough
+ * heuristic for string-literal contents, same spirit as the dangling-dot
+ * detector -- good enough for the common case, not exhaustive. */
+static int find_call_context(const char *text, long pos, const char **out_callee,
+                              size_t *out_callee_len, int *out_active) {
+	int depth = 0;
+	int active = 0;
+	for (long i = pos - 1; i >= 0; i--) {
+		char c = text[i];
+		if (c == ')' || c == ']' || c == '}') { depth++; continue; }
+		if (c == '(') {
+			if (depth > 0) { depth--; continue; }
+			long j = i - 1;
+			while (j >= 0 && isspace((unsigned char)text[j])) j--;
+			long end = j + 1;
+			while (j >= 0 && (isalnum((unsigned char)text[j]) || text[j] == '_')) j--;
+			long start = j + 1;
+			if (start >= end) return 0;   /* nothing identifier-like before '(' */
+			*out_callee = text + start;
+			*out_callee_len = (size_t)(end - start);
+			*out_active = active;
+			return 1;
+		}
+		if (c == '[' || c == '{') {
+			if (depth > 0) { depth--; continue; }
+			return 0;   /* enclosed by a list/map literal, not a call */
+		}
+		if (c == ',' && depth == 0) active++;
+	}
+	return 0;
+}
+
+static void handle_signature_help(jval *id, jval *params) {
+	jval *td = jget(params, "textDocument");
+	jval *pos = jget(params, "position");
+	const char *uri = jstr(jget(td, "uri"));
+	int line = jint(jget(pos, "line"), 0) + 1;
+	int col  = jint(jget(pos, "character"), 0) + 1;
+	fb_Doc *d = uri ? doc_find(uri) : NULL;
+	if (!d || !d->text) { send_result(id, "null"); return; }
+
+	long off = line_col_offset(d->text, line, col);
+	const char *callee; size_t callee_len; int active;
+	if (!find_call_context(d->text, off, &callee, &callee_len, &active)) {
+		send_result(id, "null"); return;
+	}
+
+	/* d->prog may be NULL (e.g. this very call is unclosed, mid-typing) --
+	 * fb_lookup_signature only needs it for a user-defined callee's real
+	 * type; builtins resolve without it. */
+	obj_type *sig = fb_lookup_signature(d->prog, callee, callee_len);
+	if (!sig || sig->ret != RET_FUNCTOR) { send_result(id, "null"); return; }
+
+	obj_type *pt[32];
+	int np = fb_functor_params(sig, pt, 32);
+	if (np > 0 && active >= np) active = np - 1;   /* cap into the last (possibly variadic) slot */
+
+	char *full = obj_type_sprint(sig);
+	size_t label_cap = callee_len + strlen(full) + 1;
+	char *label = malloc(label_cap);
+	snprintf(label, label_cap, "%.*s%s", (int)callee_len, callee, full);
+
+	dbuf b; dbuf_init(&b);
+	dbuf_puts(&b, "{\"signatures\":[{\"label\":");
+	dbuf_putjstr(&b, label);
+	dbuf_puts(&b, ",\"parameters\":[");
+	for (int i = 0; i < np; i++) {
+		if (i) dbuf_puts(&b, ",");
+		dbuf_puts(&b, "{\"label\":");
+		dbuf_putjstr(&b, obj_type_sprint(pt[i]));
+		dbuf_puts(&b, "}");
+	}
+	dbuf_putf(&b, "]}],\"activeSignature\":0,\"activeParameter\":%d}", np > 0 ? active : 0);
+	send_result(id, b.buf);
+	free(b.buf);
+	free(label);
 }
 
 static void handle_hover(jval *id, jval *params) {
@@ -778,6 +884,7 @@ static void handle_message(const char *body, size_t len) {
 	else if (!strcmp(method, "textDocument/definition"))  handle_definition(id, params);
 	else if (!strcmp(method, "textDocument/documentSymbol")) handle_document_symbol(id, params);
 	else if (!strcmp(method, "textDocument/completion"))  handle_completion(id, params);
+	else if (!strcmp(method, "textDocument/signatureHelp")) handle_signature_help(id, params);
 	else if (!strcmp(method, "shutdown"))                 handle_shutdown(id);
 	else if (!strcmp(method, "exit")) {
 		jfree(msg);

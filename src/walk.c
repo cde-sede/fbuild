@@ -2194,3 +2194,44 @@ int fb_document_symbols(ast *prog, fb_DocSymbol *out, int max_out) {
 	}
 	return n;
 }
+
+/* Best-effort functor signature for a callee named `name` (a raw text
+ * slice, len bytes -- not tied to any specific AST node, so this works
+ * even when `prog` doesn't parse, e.g. mid-typing an unclosed call): a
+ * builtin (curated or arity-based, via builtin_signature) takes priority,
+ * else a top-level user function's own already-inferred type in `prog`
+ * (the generic, context-free signature -- same one a bare hover on the
+ * def's own name shows, e.g. "((?, ? -> ?), ?, *? -> ?)"). `prog` may be
+ * NULL (only builtins resolve then). Returns NULL if nothing is known. */
+obj_type *fb_lookup_signature(ast *prog, const char *name, size_t len) {
+	token tmp = {0};
+	tmp.string = (char *)name;
+	tmp.len = len;
+	obj_type *sig = builtin_signature(&tmp, NULL);
+	if (sig) return sig;
+	if (!prog) return NULL;
+	collect_symbols(prog);
+	for (int i = 0; i < g_ndefsyms; i++)
+		if (g_defsyms[i].name->len == len && !strncmp(g_defsyms[i].name->string, name, len))
+			return g_defsyms[i].site->type;
+	return NULL;
+}
+
+/* Individual parameter types of a RET_FUNCTOR, flattening a Tuple-shaped
+ * param slot into one entry per element (the same rule
+ * obj_type_sprint_into's RET_FUNCTOR case renders by) -- e.g. for signature
+ * help, which needs each argument's own type/label rather than one string
+ * for the whole param list. Writes at most max_out into out, returns the
+ * count written (0 if `t` isn't RET_FUNCTOR). */
+int fb_functor_params(obj_type *t, obj_type **out, int max_out) {
+	if (!t || t->ret != RET_FUNCTOR || max_out <= 0) return 0;
+	obj_type *p = t->nchildren > 0 ? t->children[0] : NULL;
+	if (!p) return 0;
+	if (p->ret == RET_TUPLE) {
+		int n = 0;
+		for (size_t i = 0; i < p->nchildren && n < max_out; i++) out[n++] = p->children[i];
+		return n;
+	}
+	out[0] = p;
+	return 1;
+}
