@@ -169,7 +169,10 @@ typedef struct { fb_Span def_span; fb_DefKind kind; } fb_Definition;
  * site in this file (builtin, or unresolved). */
 int fb_find_definition(ast *prog, int line, int col, fb_Definition *out, int max_out);
 
-typedef struct { char *text; fb_Span span; } fb_HoverInfo;
+/* `markdown` is 1 when `text` uses markdown formatting (a builtin's
+ * fleshed-out doc: fenced signature + prose sections) -- 0 for a plain
+ * inferred-type string, so a caller can pick the right LSP MarkupKind. */
+typedef struct { char *text; fb_Span span; int markdown; } fb_HoverInfo;
 
 /* Inferred type of the node at (line, col), rendered as a string (see
  * obj_type_sprint). Returns 0 if no node covers that position. */

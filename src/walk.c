@@ -2002,7 +2002,26 @@ int fb_hover_at(ast *prog, int line, int col, fb_HoverInfo *out) {
 	const fb_Reg *rg = (n->kind == AST_ID && n->tok)
 	                  ? fb_reg_findn(n->tok->string, n->tok->len) : NULL;
 	if (rg && rg->doc) {
-		out->text = a_dup(rg->doc);
+		/* Prepend the computed signature as a fenced code block ahead of
+		 * the doc's own prose sections (see builtin_docs.h for the
+		 * convention) -- a doc string alone omits arity/types entirely.
+		 * Skip this for FB_GLOBAL (a bound value, not a callable) -- its
+		 * min/max in the arity table describes fb_global_bind's own
+		 * plumbing, not a call shape, so a synthesized "name(...)" would
+		 * be actively misleading; the doc's own "**Type**" line already
+		 * says what it is. */
+		obj_type *sig = (rg->flags & FB_GLOBAL) ? NULL : builtin_signature(n->tok, NULL);
+		if (sig) {
+			char *sigstr = obj_type_sprint(sig);
+			size_t cap = n->tok->len + strlen(sigstr) + strlen(rg->doc) + 32;
+			char *buf = a_alloc(cap);
+			snprintf(buf, cap, "```funcbuild\n%.*s%s\n```\n\n%s",
+			         (int)n->tok->len, n->tok->string, sigstr, rg->doc);
+			out->text = buf;
+		} else {
+			out->text = a_dup(rg->doc);
+		}
+		out->markdown = 1;
 		return 1;
 	}
 
@@ -2042,6 +2061,7 @@ int fb_hover_at(ast *prog, int line, int col, fb_HoverInfo *out) {
 		g_specialize_calls = 0;
 	}
 	out->text = obj_type_sprint(n->type);
+	out->markdown = 0;
 	return 1;
 }
 
@@ -2055,10 +2075,18 @@ int fb_complete_at(ast *prog, int line, int col, fb_CompItem *out, int max_out) 
 		token tmp = {0};
 		tmp.string = (char *)g_core_arity[i].name;
 		tmp.len = strlen(g_core_arity[i].name);
-		obj_type *sig = builtin_signature(&tmp, NULL);
+		/* A FB_GLOBAL name (args, cwd, ...) is a bound value, not a
+		 * callable -- its arity-table entry describes fb_global_bind's own
+		 * plumbing, not a call shape, so synthesizing "name(...)" here
+		 * would be misleading. Use the doc's own summary line instead. */
+		const fb_Reg *grg = fb_reg_findn(tmp.string, tmp.len);
+		int is_global = grg && (grg->flags & FB_GLOBAL);
+		obj_type *sig = is_global ? NULL : builtin_signature(&tmp, NULL);
 		out[n].name = g_core_arity[i].name;
 		out[n].kind = FB_COMP_BUILTIN;
-		out[n].detail = sig ? obj_type_sprint(sig) : NULL;
+		if (sig) out[n].detail = obj_type_sprint(sig);
+		else if (is_global && grg->doc) out[n].detail = a_dupn(grg->doc, strcspn(grg->doc, "\n"));
+		else out[n].detail = NULL;
 		n++;
 	}
 	for (int i = 0; i < fb_reg_count(NULL) && n < max_out; i++) {
@@ -2069,7 +2097,11 @@ int fb_complete_at(ast *prog, int line, int col, fb_CompItem *out, int max_out) 
 		if (dup) continue;
 		out[n].name = rg->name;
 		out[n].kind = FB_COMP_BUILTIN;
-		out[n].detail = rg->doc;
+		/* Just the summary line: a fully fleshed-out doc (see
+		 * builtin_docs.h) is multiple paragraphs, too long for a
+		 * completion item's single-line detail -- full text is still
+		 * available via hover. */
+		out[n].detail = rg->doc ? a_dupn(rg->doc, strcspn(rg->doc, "\n")) : NULL;
 		n++;
 	}
 

@@ -732,7 +732,8 @@ static void handle_hover(jval *id, jval *params) {
 	int ok = fb_hover_at(prog, line, col, &hi);
 	if (ok) {
 		dbuf b; dbuf_init(&b);
-		dbuf_puts(&b, "{\"contents\":{\"kind\":\"plaintext\",\"value\":");
+		dbuf_puts(&b, hi.markdown ? "{\"contents\":{\"kind\":\"markdown\",\"value\":"
+		                          : "{\"contents\":{\"kind\":\"plaintext\",\"value\":");
 		dbuf_putjstr(&b, hi.text);
 		dbuf_putf(&b, "},\"range\":{\"start\":{\"line\":%d,\"character\":%d},\"end\":{\"line\":%d,\"character\":%d}}}",
 		           z(hi.span.start.line), z(hi.span.start.col), z(hi.span.end.line), z(hi.span.end.col));
