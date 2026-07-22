@@ -1538,6 +1538,18 @@ void obj_type_print(obj_type *t) {
 	case RET_OBJECT:
 		if (t->class_name) printf("%.*s", (int)t->class_name->len, t->class_name->string);
 		else                printf("Object");
+		/* A plain `type X(...)` class instance never tracks field shapes
+		 * (see ast.h) -- only infer_parser_schema's Parser<schema> records
+		 * populate `fields` on a RET_OBJECT, so this only fires there. */
+		if (t->fields && t->nchildren) {
+			printf("<{ ");
+			for (size_t i = 0; i < t->nchildren; i++) {
+				if (i) printf(", ");
+				if (t->fields[i]) printf("%.*s: ", (int)t->fields[i]->len, t->fields[i]->string);
+				obj_type_print(t->children[i]);
+			}
+			printf(" }>");
+		}
 		break;
 
 	case RET_LIST:
@@ -1911,6 +1923,15 @@ static void obj_type_sprint_into(obj_type *t, char *buf, size_t bufsz, size_t *p
 	case RET_OBJECT:
 		if (t->class_name) APPEND("%.*s", (int)t->class_name->len, t->class_name->string);
 		else                APPEND("Object");
+		if (t->fields && t->nchildren) {
+			APPEND("<{ ");
+			for (size_t i = 0; i < t->nchildren; i++) {
+				if (i) APPEND(", ");
+				if (t->fields[i]) APPEND("%.*s: ", (int)t->fields[i]->len, t->fields[i]->string);
+				obj_type_sprint_into(t->children[i], buf, bufsz, pos);
+			}
+			APPEND(" }>");
+		}
 		break;
 	case RET_LIST:
 		if (t->is_variadic) {
