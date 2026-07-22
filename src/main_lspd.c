@@ -700,6 +700,49 @@ static int find_call_context(const char *text, long pos, const char **out_callee
 	return found;
 }
 
+/* `Parser<{...}>` (build_system.c's parse_parser_ctor) is a whole separate
+ * grammar production from a call -- an angle-bracket generic construct like
+ * Tuple<>/List<>/Map<>, not AST_CALL -- so find_call_context (paren-only)
+ * never fires inside one, and there's no real per-argument position to
+ * track anyway (the schema is one map literal, not a comma-separated arg
+ * list). Detect it instead by finding the last "Parser<" before `pos` and
+ * depth-tracking ({}/[]/(), string-masked) forward from there to see
+ * whether its schema map is still open at `pos`. */
+static int in_parser_ctor(const char *text, long pos) {
+	long found = -1;
+	for (long i = 0; i + 7 <= pos; i++)
+		if (!strncmp(text + i, "Parser<", 7)) found = i + 7;
+	if (found < 0) return 0;
+	char *in_str = mask_strings(text, strlen(text));
+	int depth = 0;
+	int closed = 0;
+	for (long i = found; i < pos && !closed; i++) {
+		if (in_str[i]) continue;
+		char c = text[i];
+		if (c == '{' || c == '[' || c == '(') depth++;
+		else if (c == '}' || c == ']' || c == ')') { if (depth > 0) depth--; }
+		else if (c == '>' && depth == 0) closed = 1;
+	}
+	free(in_str);
+	return !closed;
+}
+
+#define FBSIG_PARSER_CTOR \
+"Parser<{...}> -- CLI arg parser built from a schema map, one entry per option.\n" \
+"\n" \
+"**Entry value**\n" \
+"- `\"type\"` — shorthand: just `\"bool\"` / `\"int\"` / `\"str\"` (long/short auto-derived)\n" \
+"- or a spec map: `{ \"type\":..., \"long\":..., \"short\":..., \"default\":..., \"help\":... }`\n" \
+"\n" \
+"**Spec keys**\n" \
+"- `type` — `\"bool\"` | `\"int\"` | `\"str\"`\n" \
+"- `long` — long flag spelling, e.g. `\"--jobs\"`\n" \
+"- `short` — short flag; auto = `-<first letter>` if unique\n" \
+"- `default` — value, or a `Unit -> value` lambda for a lazy default\n" \
+"- `help` — shown in the auto-generated `--help`\n" \
+"\n" \
+"Bare `Parser<schema>` parses the program's own CLI args; `Parser<schema>(list)` parses a custom list instead."
+
 static void handle_signature_help(jval *id, jval *params) {
 	jval *td = jget(params, "textDocument");
 	jval *pos = jget(params, "position");
@@ -710,6 +753,21 @@ static void handle_signature_help(jval *id, jval *params) {
 	if (!d || !d->text) { send_result(id, "null"); return; }
 
 	long off = line_col_offset(d->text, line, col);
+
+	/* Parser<{...}> is a different grammar production from a call (see
+	 * in_parser_ctor) -- no active-argument tracking, just a fixed usage
+	 * blurb whenever the cursor is anywhere inside one. */
+	if (in_parser_ctor(d->text, off)) {
+		dbuf b; dbuf_init(&b);
+		dbuf_puts(&b, "{\"signatures\":[{\"label\":\"Parser<{...}>\",\"documentation\":"
+		              "{\"kind\":\"markdown\",\"value\":");
+		dbuf_putjstr(&b, FBSIG_PARSER_CTOR);
+		dbuf_puts(&b, "},\"parameters\":[]}],\"activeSignature\":0,\"activeParameter\":0}");
+		send_result(id, b.buf);
+		free(b.buf);
+		return;
+	}
+
 	const char *callee; size_t callee_len; int active;
 	if (!find_call_context(d->text, off, &callee, &callee_len, &active)) {
 		send_result(id, "null"); return;
