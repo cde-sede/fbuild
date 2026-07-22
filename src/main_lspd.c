@@ -573,6 +573,41 @@ static ast *recover_prog(fb_Doc *d, fb_State **out_scratch) {
 	return prog2;
 }
 
+/* Signature help's recovery for a call that's unclosed mid-typing (e.g.
+ * "p = Point(1, " with the cursor right after the comma) -- unlike a
+ * dangling dot, there's no single unambiguous character to splice back in
+ * (closing the call correctly would need to know how many nesting levels
+ * are open and whether a placeholder argument is needed before the ')',
+ * genuinely ambiguous for e.g. "zip(filter([1], "). But signature help
+ * doesn't need the broken call's own AST at all -- find_call_context
+ * already got the callee name and active-argument index from a pure text
+ * scan; the only thing a reparse needs to recover is the CALLEE's own
+ * top-level definition elsewhere in the document, so its inferred type is
+ * available via fb_lookup_signature. Dropping the whole current line (back
+ * to the last '\n') and reparsing just that prefix keeps every earlier
+ * definition intact while discarding the unparseable tail -- doesn't help
+ * when the broken call spans multiple lines (the earlier lines of the same
+ * statement stay dangling too, so the prefix still won't parse and this
+ * falls back to NULL, same as not attempting recovery at all). */
+static ast *recover_prog_for_call(fb_Doc *d, long cursor_off, fb_State **out_scratch) {
+	if (!d->text || cursor_off <= 0) return NULL;
+	long line_start = cursor_off;
+	while (line_start > 0 && d->text[line_start - 1] != '\n') line_start--;
+	if (line_start == 0) return NULL;   /* whole doc is one unclosed line */
+	char *prefix = malloc((size_t)line_start + 1);
+	memcpy(prefix, d->text, (size_t)line_start);
+	prefix[line_start] = '\0';
+	fb_State *scratch = fb_new();
+	load_workspace_plugins(scratch);
+	ast *prog2 = NULL;
+	fb_Diag tmp[1];
+	fb_check(scratch, prefix, d->uri, tmp, 1, &prog2);
+	free(prefix);
+	if (!prog2) { fb_close(scratch); return NULL; }
+	*out_scratch = scratch;
+	return prog2;
+}
+
 /* Byte offset (0-based) of 1-based (line, col) in `text`. No UTF-16
  * handling, same ASCII-position assumption the rest of this file already
  * makes (LSP character offsets are just treated as byte offsets). */
@@ -682,9 +717,22 @@ static void handle_signature_help(jval *id, jval *params) {
 
 	/* d->prog may be NULL (e.g. this very call is unclosed, mid-typing) --
 	 * fb_lookup_signature only needs it for a user-defined callee's real
-	 * type; builtins resolve without it. */
+	 * type (a class constructor included: `type Point(x,y)=...` desugars
+	 * to a plain top-level lambda def, so it's found the same way); builtins
+	 * resolve without it. If the callee isn't a builtin and the document
+	 * doesn't parse, recover just enough to find the callee's own
+	 * definition (see recover_prog_for_call). */
+	fb_State *scratch = NULL;
 	obj_type *sig = fb_lookup_signature(d->prog, callee, callee_len);
-	if (!sig || sig->ret != RET_FUNCTOR) { send_result(id, "null"); return; }
+	if (!sig && !d->prog) {
+		ast *prog2 = recover_prog_for_call(d, off, &scratch);
+		if (prog2) sig = fb_lookup_signature(prog2, callee, callee_len);
+	}
+	if (!sig || sig->ret != RET_FUNCTOR) {
+		send_result(id, "null");
+		if (scratch) fb_close(scratch);
+		return;
+	}
 
 	obj_type *pt[32];
 	int np = fb_functor_params(sig, pt, 32);
@@ -709,6 +757,7 @@ static void handle_signature_help(jval *id, jval *params) {
 	send_result(id, b.buf);
 	free(b.buf);
 	free(label);
+	if (scratch) fb_close(scratch);
 }
 
 static void handle_hover(jval *id, jval *params) {
