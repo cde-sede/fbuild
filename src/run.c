@@ -792,6 +792,23 @@ const fb_Reg *fb_reg_findn(const char *name, size_t len) {
 const fb_Reg *fb_reg_find(const char *name) {
 	return fb_reg_findn(name, strlen(name));
 }
+int fb_reg_has_class(const char *class_name) {
+	size_t len = strlen(class_name);
+	for (int i = 0; i < g_nreg; i++)
+		if (!strncmp(g_regs[i].name, class_name, len) && g_regs[i].name[len] == '.')
+			return 1;
+	return 0;
+}
+int fb_reg_class_methods(const char *class_name, const fb_Reg **out, int max_out) {
+	size_t len = strlen(class_name);
+	int n = 0;
+	for (int i = 0; i < g_nreg; i++)
+		if (!strncmp(g_regs[i].name, class_name, len) && g_regs[i].name[len] == '.') {
+			if (n < max_out) out[n] = &g_regs[i];
+			n++;
+		}
+	return n;
+}
 int fb_reg_count(fb_State *S) { (void)S; return g_nreg; }
 const fb_Reg *fb_reg_at(fb_State *S, int i) {
 	(void)S;
@@ -1019,8 +1036,26 @@ static rval *make_cfun(fb_CFunction fn) {
 fb_Class fb_class(fb_State *S, const char *name) {
 	fb_activate(S); return (fb_Class)class_ensure(name);
 }
-void fb_method(fb_State *S, fb_Class c, const char *name, fb_CFunction fn) {
-	fb_activate(S); class_add_method((rval *)c, name, make_cfun(fn));
+void fb_method(fb_State *S, fb_Class c, const char *name, fb_CFunction fn,
+               const fb_Reg *meta) {
+	fb_activate(S);
+	class_add_method((rval *)c, name, make_cfun(fn));
+	if (!meta) return;
+	/* Shadow flat-registry entry "ClassName.method" so walk.c's checker/
+	 * hover can find this method's shape (see native_method_type there) --
+	 * only ever looked up by that composite string (never a valid bare
+	 * identifier token), so it's unreachable through ordinary call dispatch
+	 * despite reusing the real `fn` pointer (simpler than a dummy stub, and
+	 * fb_register rejects a NULL fn outright). min/max/ret/doc/param_types/
+	 * nparams/ret_class are the only fields actually read; name/fn are
+	 * already this call's own params, and a method is never FB_GLOBAL. */
+	rval *cls = (rval *)c;
+	size_t cn = strlen(cls->s), mn = strlen(name);
+	char *key = a_alloc(cn + 1 + mn + 1);
+	sprintf(key, "%s.%s", cls->s, name);
+	fb_register(S, &(fb_Reg){ key, fn, meta->min, meta->max, meta->ret, 0,
+	                          meta->doc, meta->param_types, meta->nparams,
+	                          meta->ret_class });
 }
 fb_Value fb_object(fb_State *S, fb_Class c, void *data) {
 	fb_activate(S); return (fb_Value)make_object((rval *)c, NULL, data);

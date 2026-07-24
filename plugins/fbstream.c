@@ -103,10 +103,16 @@ static fb_Value m_close(fb_State *S, fb_Value *a, int n) {
 /* Hover documentation, same convention as src/builtin_docs.h (core's
  * centralized table): summary + **Params** + **Returns** + **Example**.
  * Plugins are separate translation units so this lives locally instead of
- * sharing that header -- same fb_Reg.doc ABI field either way. Only the
- * `stream` constructor goes through fb_Reg -- its .write/.writeln/
- * .writelines/.flush/.close methods are native class dispatch (fb_method),
- * not individually documentable this way. */
+ * sharing that header -- same fb_Reg.doc ABI field either way.
+ *
+ * stream()'s `ret_class = "Stream"` (fbuild.h) types its return as a real,
+ * nameable RET_OBJECT instead of a bare "?" -- which is what makes
+ * .write/.writeln/.../.close's own fb_method() metadata findable too: the
+ * checker looks a method up by the RECEIVER'S CLASS NAME ("Stream.write"),
+ * not by whatever local variable name the script happens to use for one
+ * particular instance (`s = stream(...); s.write(...)` -- `s`'s inferred
+ * type is RET_OBJECT{class_name="Stream"} regardless of it being named `s`
+ * here and `out` three lines later). */
 
 #define FBDOC_stream \
 "Opens a file for incremental writing -- build it up line by line without holding the whole content in a String first, unlike core's `write(path, str)` (one atomic whole-content write). Returns a `Stream` object with `.write(s)`, `.writeln(s)`, `.writelines(list)`, `.flush()`, `.close()` methods (each chainable except flush/close, which return `Bool`).\n" \
@@ -128,14 +134,28 @@ int fbuild_abi(void) { return FBUILD_ABI; }
 
 int fbuild_open(fb_State *S) {
 	STREAM_CLS = fb_class(S, "Stream");
-	fb_method(S, STREAM_CLS, "write",      m_write);
-	fb_method(S, STREAM_CLS, "writeln",    m_writeln);
-	fb_method(S, STREAM_CLS, "writelines", m_writelines);
-	fb_method(S, STREAM_CLS, "flush",      m_flush);
-	fb_method(S, STREAM_CLS, "close",      m_close);
+	static const fb_Ret str1[] = { FB_RET_STR };
+	static const fb_Ret list1[] = { FB_RET_LIST };
+	fb_method(S, STREAM_CLS, "write",      m_write,
+	          &(fb_Reg){ "write", m_write, 1, 1, FB_RET_ANY, 0,
+	                     "raw write, no newline; chainable", str1, 1, "Stream" });
+	fb_method(S, STREAM_CLS, "writeln",    m_writeln,
+	          &(fb_Reg){ "writeln", m_writeln, 1, 1, FB_RET_ANY, 0,
+	                     "s + \"\\n\"; chainable", str1, 1, "Stream" });
+	fb_method(S, STREAM_CLS, "writelines", m_writelines,
+	          &(fb_Reg){ "writelines", m_writelines, 1, 1, FB_RET_ANY, 0,
+	                     "each element stringified + \"\\n\" (bare value ok too); chainable",
+	                     list1, 1, "Stream" });
+	fb_method(S, STREAM_CLS, "flush",      m_flush,
+	          &(fb_Reg){ "flush", m_flush, 0, 0, FB_RET_BOOL, 0, "flush buffered writes",
+	                     NULL, 0, NULL });
+	fb_method(S, STREAM_CLS, "close",      m_close,
+	          &(fb_Reg){ "close", m_close, 0, 0, FB_RET_BOOL, 0,
+	                     "flush + close; safe to call more than once", NULL, 0, NULL });
 
+	static const fb_Ret stream_params[] = { FB_RET_STR, FB_RET_STR };
 	static const fb_Reg regs[] = {
-		{ "stream", bi_stream, 1, 2, FB_RET_ANY, 0, FBDOC_stream },
+		{ "stream", bi_stream, 1, 2, FB_RET_ANY, 0, FBDOC_stream, stream_params, 2, "Stream" },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);

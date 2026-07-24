@@ -1089,49 +1089,49 @@ static fb_Value w_run(fb_State*S,fb_Value*a,int n){(void)S;
 void fb_open_base(fb_State *S) {
 	static const fb_Reg base[] = {
 		/* io / process */
-		{"env",w_env,1,1,FB_RET_STR,0,FBDOC_env}, {"shell",w_shell,1,1,FB_RET_ANY,0,FBDOC_shell},
-		{"which",w_which,1,1,FB_RET_FILE,0,FBDOC_which}, {"pkgconfig",l_pkgconfig,1,1,FB_RET_MAP,0,FBDOC_pkgconfig},
-		{"run",w_run,1,-1,FB_RET_BOOL,0,FBDOC_run}, {"print",w_print,0,-1,FB_RET_UNIT,0,FBDOC_print},
-		{"debug",w_debug,0,-1,FB_RET_UNIT,0,FBDOC_debug}, {"config",w_config,1,1,FB_RET_UNIT,0,FBDOC_config},
+		{"env",w_env,1,1,FB_RET_STR,0,FBDOC_env,NULL,0,NULL}, {"shell",w_shell,1,1,FB_RET_ANY,0,FBDOC_shell,NULL,0,NULL},
+		{"which",w_which,1,1,FB_RET_FILE,0,FBDOC_which,NULL,0,NULL}, {"pkgconfig",l_pkgconfig,1,1,FB_RET_MAP,0,FBDOC_pkgconfig,NULL,0,NULL},
+		{"run",w_run,1,-1,FB_RET_BOOL,0,FBDOC_run,NULL,0,NULL}, {"print",w_print,0,-1,FB_RET_UNIT,0,FBDOC_print,NULL,0,NULL},
+		{"debug",w_debug,0,-1,FB_RET_UNIT,0,FBDOC_debug,NULL,0,NULL}, {"config",w_config,1,1,FB_RET_UNIT,0,FBDOC_config,NULL,0,NULL},
 		/* time */
-		{"clock",w_clock,0,0,FB_RET_INT,0,FBDOC_clock}, {"time",w_time,0,0,FB_RET_INT,0,FBDOC_time},
-		{"sleep",w_sleep,1,1,FB_RET_UNIT,0,FBDOC_sleep}, {"bench",w_bench,2,2,FB_RET_ANY,FB_LAZY,FBDOC_bench},
+		{"clock",w_clock,0,0,FB_RET_INT,0,FBDOC_clock,NULL,0,NULL}, {"time",w_time,0,0,FB_RET_INT,0,FBDOC_time,NULL,0,NULL},
+		{"sleep",w_sleep,1,1,FB_RET_UNIT,0,FBDOC_sleep,NULL,0,NULL}, {"bench",w_bench,2,2,FB_RET_ANY,FB_LAZY,FBDOC_bench,NULL,0,NULL},
 		/* filesystem (move/symlink/remove/touch/is_dir/is_file -> fbfs plugin) */
-		{"glob",w_glob,1,1,FB_RET_LIST,0,FBDOC_glob}, {"exists",w_exists,1,1,FB_RET_BOOL,0,FBDOC_exists},
-		{"mkdir",w_mkdir,1,1,FB_RET_FILE,0,FBDOC_mkdir}, {"read",w_read,1,1,FB_RET_STR,0,FBDOC_read},
-		{"write",w_write,2,2,FB_RET_FILE,0,FBDOC_write}, {"copy",w_copy,2,2,FB_RET_FILE,0,FBDOC_copy},
-		{"stale",w_stale,1,-1,FB_RET_BOOL,0,FBDOC_stale},
+		{"glob",w_glob,1,1,FB_RET_LIST,0,FBDOC_glob,NULL,0,NULL}, {"exists",w_exists,1,1,FB_RET_BOOL,0,FBDOC_exists,NULL,0,NULL},
+		{"mkdir",w_mkdir,1,1,FB_RET_FILE,0,FBDOC_mkdir,NULL,0,NULL}, {"read",w_read,1,1,FB_RET_STR,0,FBDOC_read,NULL,0,NULL},
+		{"write",w_write,2,2,FB_RET_FILE,0,FBDOC_write,NULL,0,NULL}, {"copy",w_copy,2,2,FB_RET_FILE,0,FBDOC_copy,NULL,0,NULL},
+		{"stale",w_stale,1,-1,FB_RET_BOOL,0,FBDOC_stale,NULL,0,NULL},
 		/* list glue (iteration/transform ops -> fbloop plugin) */
-		{"zip",w_zip,2,-1,FB_RET_LIST,0,FBDOC_zip}, {"filter",w_filter,2,2,FB_RET_LIST,0,FBDOC_filter},
-		{"contains",w_contains,2,2,FB_RET_BOOL,0,FBDOC_contains},
-		{"concat",w_concat,0,-1,FB_RET_LIST,0,FBDOC_concat},
-		{"length",w_length,1,1,FB_RET_INT,0,FBDOC_length}, {"first",w_first,1,1,FB_RET_ANY,0,FBDOC_first},
-		{"last",w_last,1,1,FB_RET_ANY,0,FBDOC_last},
+		{"zip",w_zip,2,-1,FB_RET_LIST,0,FBDOC_zip,NULL,0,NULL}, {"filter",w_filter,2,2,FB_RET_LIST,0,FBDOC_filter,NULL,0,NULL},
+		{"contains",w_contains,2,2,FB_RET_BOOL,0,FBDOC_contains,NULL,0,NULL},
+		{"concat",w_concat,0,-1,FB_RET_LIST,0,FBDOC_concat,NULL,0,NULL},
+		{"length",w_length,1,1,FB_RET_INT,0,FBDOC_length,NULL,0,NULL}, {"first",w_first,1,1,FB_RET_ANY,0,FBDOC_first,NULL,0,NULL},
+		{"last",w_last,1,1,FB_RET_ANY,0,FBDOC_last,NULL,0,NULL},
 		/* string glue (text utilities -> fbstr plugin) */
-		{"cat",w_cat,0,-1,FB_RET_STR,0,FBDOC_cat}, {"join",w_join,2,2,FB_RET_STR,0,FBDOC_join},
-		{"split",w_split,2,2,FB_RET_LIST,0,FBDOC_split}, {"subst",w_subst,3,3,FB_RET_STR,0,FBDOC_subst},
-		{"to_int",w_to_int,1,1,FB_RET_INT,0,FBDOC_to_int}, {"to_str",w_to_str,1,1,FB_RET_STR,0,FBDOC_to_str},
-		{"to_float",w_to_float,1,1,FB_RET_FLOAT,0,FBDOC_to_float},
+		{"cat",w_cat,0,-1,FB_RET_STR,0,FBDOC_cat,NULL,0,NULL}, {"join",w_join,2,2,FB_RET_STR,0,FBDOC_join,NULL,0,NULL},
+		{"split",w_split,2,2,FB_RET_LIST,0,FBDOC_split,NULL,0,NULL}, {"subst",w_subst,3,3,FB_RET_STR,0,FBDOC_subst,NULL,0,NULL},
+		{"to_int",w_to_int,1,1,FB_RET_INT,0,FBDOC_to_int,NULL,0,NULL}, {"to_str",w_to_str,1,1,FB_RET_STR,0,FBDOC_to_str,NULL,0,NULL},
+		{"to_float",w_to_float,1,1,FB_RET_FLOAT,0,FBDOC_to_float,NULL,0,NULL},
 		/* path */
-		{"parent",w_parent,1,1,FB_RET_STR,0,FBDOC_parent}, {"name",w_name,1,1,FB_RET_STR,0,FBDOC_name},
-		{"stem",w_stem,1,1,FB_RET_STR,0,FBDOC_stem}, {"suffix",w_suffix,1,1,FB_RET_STR,0,FBDOC_suffix},
-		{"with_suffix",w_with_suffix,2,2,FB_RET_FILE,0,FBDOC_with_suffix}, {"with_name",w_with_name,2,2,FB_RET_FILE,0,FBDOC_with_name},
-		{"path",w_path,0,-1,FB_RET_FILE,0,FBDOC_path}, {"abs",w_abs,1,1,FB_RET_FILE,0,FBDOC_abs},
+		{"parent",w_parent,1,1,FB_RET_STR,0,FBDOC_parent,NULL,0,NULL}, {"name",w_name,1,1,FB_RET_STR,0,FBDOC_name,NULL,0,NULL},
+		{"stem",w_stem,1,1,FB_RET_STR,0,FBDOC_stem,NULL,0,NULL}, {"suffix",w_suffix,1,1,FB_RET_STR,0,FBDOC_suffix,NULL,0,NULL},
+		{"with_suffix",w_with_suffix,2,2,FB_RET_FILE,0,FBDOC_with_suffix,NULL,0,NULL}, {"with_name",w_with_name,2,2,FB_RET_FILE,0,FBDOC_with_name,NULL,0,NULL},
+		{"path",w_path,0,-1,FB_RET_FILE,0,FBDOC_path,NULL,0,NULL}, {"abs",w_abs,1,1,FB_RET_FILE,0,FBDOC_abs,NULL,0,NULL},
 		/* json / map */
-		{"json_parse",w_json_parse,1,1,FB_RET_ANY,0,FBDOC_json_parse}, {"json_read",w_json_read,1,1,FB_RET_ANY,0,FBDOC_json_read},
-		{"json_str",w_json_str,1,1,FB_RET_STR,0,FBDOC_json_str}, {"json_pretty",w_json_pretty,1,1,FB_RET_STR,0,FBDOC_json_pretty},
-		{"json_write",w_json_write,2,2,FB_RET_FILE,0,FBDOC_json_write}, {"get",w_get,2,2,FB_RET_ANY,0,FBDOC_get},
-		{"has",w_has,2,2,FB_RET_BOOL,0,FBDOC_has}, {"keys",w_keys,1,1,FB_RET_LIST,0,FBDOC_keys},
-		{"values",w_values,1,1,FB_RET_LIST,0,FBDOC_values}, {"items",w_items,1,1,FB_RET_LIST,0,FBDOC_items},
+		{"json_parse",w_json_parse,1,1,FB_RET_ANY,0,FBDOC_json_parse,NULL,0,NULL}, {"json_read",w_json_read,1,1,FB_RET_ANY,0,FBDOC_json_read,NULL,0,NULL},
+		{"json_str",w_json_str,1,1,FB_RET_STR,0,FBDOC_json_str,NULL,0,NULL}, {"json_pretty",w_json_pretty,1,1,FB_RET_STR,0,FBDOC_json_pretty,NULL,0,NULL},
+		{"json_write",w_json_write,2,2,FB_RET_FILE,0,FBDOC_json_write,NULL,0,NULL}, {"get",w_get,2,2,FB_RET_ANY,0,FBDOC_get,NULL,0,NULL},
+		{"has",w_has,2,2,FB_RET_BOOL,0,FBDOC_has,NULL,0,NULL}, {"keys",w_keys,1,1,FB_RET_LIST,0,FBDOC_keys,NULL,0,NULL},
+		{"values",w_values,1,1,FB_RET_LIST,0,FBDOC_values,NULL,0,NULL}, {"items",w_items,1,1,FB_RET_LIST,0,FBDOC_items,NULL,0,NULL},
 		/* cli args */
-		{"flag",w_flag,1,-1,FB_RET_BOOL,0,FBDOC_flag}, {"opt",w_opt,2,2,FB_RET_STR,0,FBDOC_opt},
-		{"positionals",w_positionals,0,0,FB_RET_LIST,0,FBDOC_positionals},
+		{"flag",w_flag,1,-1,FB_RET_BOOL,0,FBDOC_flag,NULL,0,NULL}, {"opt",w_opt,2,2,FB_RET_STR,0,FBDOC_opt,NULL,0,NULL},
+		{"positionals",w_positionals,0,0,FB_RET_LIST,0,FBDOC_positionals,NULL,0,NULL},
 		/* CLI globals (bound values, not calls; see run_program's fb_global_bind) */
-		{"args",w_global_noncallable,0,-1,FB_RET_LIST_STR,FB_GLOBAL,FBDOC_args},
-		{"cwd",w_global_noncallable,0,-1,FB_RET_STR,FB_GLOBAL,FBDOC_cwd},
+		{"args",w_global_noncallable,0,-1,FB_RET_LIST_STR,FB_GLOBAL,FBDOC_args,NULL,0,NULL},
+		{"cwd",w_global_noncallable,0,-1,FB_RET_STR,FB_GLOBAL,FBDOC_cwd,NULL,0,NULL},
 		/* mutable stores (bound values, not calls; see run_program's fb_global_bind) */
-		{"_GLOBALS",w_global_noncallable,0,-1,FB_RET_ANY,FB_GLOBAL,FBDOC_GLOBALS},
-		{"_SHARED",w_global_noncallable,0,-1,FB_RET_ANY,FB_GLOBAL,FBDOC_SHARED},
+		{"_GLOBALS",w_global_noncallable,0,-1,FB_RET_ANY,FB_GLOBAL,FBDOC_GLOBALS,NULL,0,NULL},
+		{"_SHARED",w_global_noncallable,0,-1,FB_RET_ANY,FB_GLOBAL,FBDOC_SHARED,NULL,0,NULL},
 	};
 	for (size_t i = 0; i < sizeof base / sizeof base[0]; i++)
 		fb_register(S, &base[i]);

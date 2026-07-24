@@ -213,15 +213,40 @@ static fb_Value bi_regex_noncallable(fb_State *S, fb_Value *a, int n) {
 
 int fbuild_abi(void) { return FBUILD_ABI; }
 
+/* every regex method's args are String -- shared param_types arrays. */
+static const fb_Ret STR2[] = { FB_RET_STR, FB_RET_STR };
+static const fb_Ret STR3[] = { FB_RET_STR, FB_RET_STR, FB_RET_STR };
+
 int fbuild_open(fb_State *S) {
-	fb_Class cls = fb_class(S, "Regex");
-	fb_method(S, cls, "match",      m_match);
-	fb_method(S, cls, "find",       m_find);
-	fb_method(S, cls, "findall",    m_findall);
-	fb_method(S, cls, "groups",     m_groups);
-	fb_method(S, cls, "replace",    m_replace);
-	fb_method(S, cls, "replaceall", m_replaceall);
-	fb_method(S, cls, "split",      m_split);
+	/* class name matches the fb_global_bind name below ("regex") so
+	 * fb_method's shadow "regex.method" registry entries are the ones the
+	 * type checker/hover actually look up (see fbuild.h's fb_method doc). */
+	fb_Class cls = fb_class(S, "regex");
+	fb_method(S, cls, "match",      m_match,
+	          &(fb_Reg){ "match", m_match, 2, 2, FB_RET_BOOL, 0,
+	                     "does `pattern` match anywhere in `s`", STR2, 2, NULL });
+	fb_method(S, cls, "find",       m_find,
+	          &(fb_Reg){ "find", m_find, 2, 2, FB_RET_ANY, 0,
+	                     "first match of `pattern` in `s`, or nil", STR2, 2, NULL });
+	fb_method(S, cls, "findall",    m_findall,
+	          &(fb_Reg){ "findall", m_findall, 2, 2, FB_RET_LIST_STR, 0,
+	                     "every non-overlapping match of `pattern` in `s`", STR2, 2, NULL });
+	fb_method(S, cls, "groups",     m_groups,
+	          &(fb_Reg){ "groups", m_groups, 2, 2, FB_RET_LIST, 0,
+	                     "capture groups of the first match (group 0 = whole match; "
+	                     "nil for a group that didn't participate), or [] if no match",
+	                     STR2, 2, NULL });
+	fb_method(S, cls, "replace",    m_replace,
+	          &(fb_Reg){ "replace", m_replace, 3, 3, FB_RET_STR, 0,
+	                     "`s` with the first match of `pattern` replaced by `repl` "
+	                     "(\\0-\\9 backreferences)", STR3, 3, NULL });
+	fb_method(S, cls, "replaceall", m_replaceall,
+	          &(fb_Reg){ "replaceall", m_replaceall, 3, 3, FB_RET_STR, 0,
+	                     "`s` with every match of `pattern` replaced by `repl` "
+	                     "(\\0-\\9 backreferences)", STR3, 3, NULL });
+	fb_method(S, cls, "split",      m_split,
+	          &(fb_Reg){ "split", m_split, 2, 2, FB_RET_LIST_STR, 0,
+	                     "`s` split on every match of `pattern`", STR2, 2, NULL });
 
 	/* registered so the type checker recognizes the bare identifier `regex`
 	 * (FB_GLOBAL: a bound value, not a callable); the real value comes from
@@ -229,7 +254,7 @@ int fbuild_open(fb_State *S) {
 	 * if someone calls `regex(...)` directly. */
 	fb_register(S, &(fb_Reg){ "regex", bi_regex_noncallable, 0, -1, FB_RET_ANY, FB_GLOBAL,
 	            "regex namespace (fbregex): match, find, findall, groups, "
-	            "replace, replaceall, split" });
+	            "replace, replaceall, split", NULL, 0, NULL });
 	fb_global_bind(S, "regex", fb_object(S, cls, NULL));
 	return 0;
 }

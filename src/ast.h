@@ -49,7 +49,9 @@ typedef enum {
 	AST_COMMAND,    /* kids = parts (CMDTEXT or interpolation expr)*/
 	AST_CMDTEXT,    /* tok = command word slice                    */
 
-	AST_ID,         /* tok                                         */
+	AST_ID,         /* tok; as a param decl: kids[0] = optional        */
+	                /* AST_TYPEEXPR annotation (parens-only, see       */
+	                /* parse_parameter's allow_type)                   */
 	AST_INT,        /* tok                                         */
 	AST_FLOAT,      /* tok                                         */
 	AST_BOOL,       /* tok = "true" / "false"                      */
@@ -57,6 +59,8 @@ typedef enum {
 	AST_STRING,     /* tok (plain) | kids = parts (interpolated)   */
 	AST_STRTEXT,    /* tok = literal text chunk in an interp string*/
 	AST_PATH,       /* tok                                         */
+	AST_TYPEEXPR,   /* tok = base type name; kids = generic args,  */
+	                /* e.g. List<Int> -> tok "List", kids[0]="Int" */
 } ast_kind;
 
 
@@ -67,6 +71,9 @@ typedef enum {
 	RET_FLOAT,
 	RET_STRING,
 	RET_BOOL,
+	RET_NUMERIC,    /* Int or Float, unresolved which -- same informal notion  */
+	                /* arithmetic operand errors already use in prose; unifies */
+	                /* with RET_INT/RET_FLOAT/itself, nothing else            */
 
 	RET_FILE,       /* a path/file: a record of name/stem/.../mtime/size  */
 	RET_COMMAND,    /* a build action produced by a `...` command literal */
@@ -76,9 +83,15 @@ typedef enum {
 	RET_FUNCTOR,    /* function: children[0]=param, children[1]=result   */
 
 	RET_OBJECT,     /* type NAME(...) = ... instance; class_name = NAME. Field
-	                 * shapes aren't tracked (same as RET_FILE-record depth) --
-	                 * this exists so hover/errors can name the class instead
-	                 * of falling back to "?"; no static field/method checking. */
+	                 * shapes (fields/children, RET_FILE-record depth) are
+	                 * tracked when the fields body is a statically-shaped map
+	                 * literal (walk.c's infer_objnew_schema) or a
+	                 * Parser<schema> record (infer_parser_schema) -- NULL
+	                 * fields for any other/dynamic shape, in which case this
+	                 * exists so hover/errors can still name the class instead
+	                 * of falling back to "?". Methods are never tracked here
+	                 * regardless (separate namespace, no static checking --
+	                 * see walk.c's class_has_method/g_methodsyms). */
 
 	RET_VAR,        /* not yet resolved (inference placeholder)          */
 } ret_type;

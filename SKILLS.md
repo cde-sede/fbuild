@@ -12,6 +12,12 @@ Map  Json                              JSON object / dynamic value
 true  false                            Bool literals
 nil  ()                                Unit literal (both spellings, same value)
 ```
+A plain-identifier param can be annotated with one of the above, `name: Type`
+-- checked at every call site, and stronger than inference inside the body.
+Requires parens around the whole param list (`(x: Int, y: Int) -> ...`, or a
+`type NAME(...)` ctor, always parenthesized); a bare `x: Int -> ...` is a
+parse error. `Type` is a scalar name above, a `type NAME(...)` class, or one
+level of `List<Type>` / `Tuple<Type, ...>`. See SYNTAX.md.
 
 ## operators
 

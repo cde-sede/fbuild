@@ -1,14 +1,14 @@
-type Point(x, y) = { x: x, y: y, length:  math.sqrt(x * x + y * y) }
+type Point(x: Int, y: Int) = { x: x, y: y, length: math.sqrt(x * x + y * y) }
 method Point.repr = self -> "<Point x={self.x} y={self.y}>"
-method Point.len  = (x, y) -> math.sqrt(x * x + y * y)
+method Point.len  = (x: Int, y: Int) -> math.sqrt(x * x + y * y)
 p = Point(3, 4)
 print(p.repr())
 print(p.len())
 print(p.length)
 
 # shorthand fields: {x, y} = {"x": x, "y": y}
-type Vec(x, y) = { x, y }
-method Vec.len = (x, y) -> math.sqrt(x * x + y * y)
+type Vec(x: Int, y: Int) = { x, y }
+method Vec.len = (x: Int, y: Int) -> math.sqrt(x * x + y * y)
 v = Vec(5, 12)
 print(v)
 print(v.len())
@@ -17,11 +17,11 @@ print(v.len())
 # syntax -- stays fully positional at the call site. Fields compose this way,
 # but methods don't come along for free: Point3D is its own class, with its
 # own separate method table, until you copy methods in explicitly.
-type Point3D(x, y, z) = { ...Point(x, y), z }
+type Point3D(x: Int, y: Int, z: Int) = { ...Point(x, y), z }
 p3 = Point3D(3, 4, 12)
 print(p3)
 print(p3.length)          # inherited field, computed by the Point(x, y) call
-method Point3D.len = (x, y, z) -> math.sqrt(x * x + y * y + z * z)
+method Point3D.len = (x: Int, y: Int, z: Int) -> math.sqrt(x * x + y * y + z * z)
 print(p3.len())
 
 # method copy: single (New.m = Old.m2) and wildcard (New.* = Old.*) forms.
@@ -30,14 +30,14 @@ print(p3.len())
 method Point3D.repr = Point.repr
 print(p3.repr())           # "<Point x=3 y=4>" -- copied verbatim, still says Point
 
-type ColorPoint3D(x, y, z, c) = { ...Point3D(x, y, z), color: c }
+type ColorPoint3D(x: Int, y: Int, z: Int, c: String) = { ...Point3D(x, y, z), color: c }
 method ColorPoint3D.* = Point3D.*
 cpd = ColorPoint3D(3, 4, 12, "blue")
 print(cpd.repr())
 print(cpd.len())
 
 # splat can also override a spread field, last write wins
-type ColorPoint(x, y, c) = { ...Point(x, y), color: c, length: 0 }
+type ColorPoint(x: Int, y: Int, c: String) = { ...Point(x, y), color: c, length: 0 }
 cp = ColorPoint(3, 4, "red")
 print(cp)                 # length: 0, not 5 -- the literal entry came after the spread
 

@@ -138,10 +138,18 @@ A plugin can define a new object type with a constructor and methods callable as
 
 ```c
 fb_Class CLS = fb_class(S, "Socket");
-fb_method(S, CLS, "send",  l_send);       /* l_send(self, data) */
-fb_method(S, CLS, "close", l_close);
+fb_method(S, CLS, "send",  l_send, &(fb_Reg){ "send", l_send, 1, 1, FB_RET_UNIT, 0,
+                                              "send data over the socket" });
+fb_method(S, CLS, "close", l_close, NULL);   /* NULL: bind only, no type/hover info */
 /* a constructor builtin returns fb_object(S, CLS, native_ptr) */
 ```
+
+The `meta` arg (may be `NULL`) is a `fb_Reg` giving the type checker/hover
+the same `min`/`max`/`ret`/`doc` a flat `fb_register()`ed function gets
+(`name`/`fn`/`flags` are ignored — the first two are already `fb_method`'s
+own params, and a method is never `FB_GLOBAL`). It only actually surfaces
+anywhere for the bare-namespace pattern below, where a fixed identifier
+lets the checker find it as `base.method` — see that section.
 
 ```
 s = socket_open("host", 8080)   # constructor builtin
@@ -162,8 +170,12 @@ instance straight to an identifier with `fb_global_bind`, so the script can
 call methods on it immediately with no setup:
 
 ```c
-fb_Class RE = fb_class(S, "Regex");
-fb_method(S, RE, "findall", m_findall);
+/* class name == the identifier it'll be bound to below ("regex") -- see
+ * the note right after this example for why that match matters. */
+fb_Class RE = fb_class(S, "regex");
+fb_method(S, RE, "findall", m_findall,
+          &(fb_Reg){ "findall", m_findall, 2, 2, FB_RET_LIST_STR, 0,
+                     "every non-overlapping match of `pattern` in `s`" });
 /* ...other methods... */
 
 /* type checker must recognize the bare name; the fn only runs if someone
@@ -177,6 +189,18 @@ fb_global_bind(S, "regex", fb_object(S, RE, NULL));
 ```
 print(regex.findall("a1 b22 c333", "[0-9]+"))   # [1, 22, 333] -- no construction
 ```
+
+**Class name must equal the bound identifier** for a method's `meta` to be
+findable: `fb_method` only has the `fb_Class` (here named `"regex"`), not
+the separate `fb_global_bind` call below it — it shadow-registers each
+method's metadata under `"<class name>.<method>"` (`"regex.findall"`), and
+that's the exact string the checker/hover build from the script text
+`regex.findall(...)` (base identifier + field name). Name the class
+anything else and the method metadata is silently unreachable — not an
+error, just dead weight. This only applies to the bare-namespace pattern:
+an object type instantiated per-call (like `Socket` above) has no fixed
+script-level identifier to key off, so its methods' `meta` (still useful as
+in-source documentation) won't be surfaced by hover/the checker either way.
 
 A script-level `regex = ...` def still shadows the bind (defs resolve first).
 

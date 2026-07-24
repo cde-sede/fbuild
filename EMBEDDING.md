@@ -179,8 +179,9 @@ static fb_Value l_get(fb_State *S, fb_Value *a, int n) {
 }
 
 CLS = fb_class(S, "Counter");
-fb_method(S, CLS, "inc", l_inc);
-fb_method(S, CLS, "get", l_get);
+fb_method(S, CLS, "inc", l_inc, NULL);   /* NULL: bind only, no type/hover info */
+fb_method(S, CLS, "get", l_get,
+          &(fb_Reg){ "get", l_get, 0, 0, FB_RET_INT, 0, "current count" });
 /* a constructor builtin returns fb_object(S, CLS, malloc(sizeof(Counter))) */
 ```
 

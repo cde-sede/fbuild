@@ -731,6 +731,7 @@ const char *ast_name[] = {
 	[AST_STRING]="string",
 	[AST_STRTEXT]="strtext",
 	[AST_PATH]="path",
+	[AST_TYPEEXPR]="typeexpr",
 };
 
 static ast *node(ast_kind k) {
@@ -790,6 +791,9 @@ static ast *parse_guarded(void);
 static ast *parse_pipe(void);
 static ast *parse_lambda(void);
 static int  lambda_ahead(int multi);
+static int  annotated_parens_ahead(void);
+static ast *parse_parameter(int allow_type);
+static ast *parse_type_expr(void);
 
 /* a lambda body extends across commas (forming a tuple) only at statement /
  * paren level; inside a call-argument or tuple element a comma separates, so
@@ -927,6 +931,24 @@ static ast *parse_atom(void) {
 	}
 
 	case TOK_LPAREN: {                   /* "(" expression ")" | "()" nil | "() -> body" */
+		if (annotated_parens_ahead()) {
+			/* "(name: Type, ...) -> body": can't reuse the plain-expression-
+			 * then-reinterpret trick below since ':' isn't valid mid-
+			 * expression at all -- parse the param list directly instead. */
+			tok_advance();                  /* "(" */
+			ast *params = node(AST_PARAMS);
+			do { skip_nl(); push(params, parse_parameter(1)); }
+			while (sig_kind() == TOK_COMMA && (skip_nl(), accept(.kind = TOK_COMMA)));
+			skip_nl();
+			expect(.kind = TOK_RPAREN);
+			skip_nl();
+			expect(.kind = TOK_ARROW);
+			skip_nl();
+			ast *lam = node(AST_LAMBDA);
+			push(lam, params);
+			push(lam, g_no_tuple ? parse_expr_no_tuple() : parse_expression());
+			return lam;
+		}
 		tok_advance();
 		skip_nl();
 		if (peek(.kind = TOK_RPAREN)) {
@@ -1516,13 +1538,83 @@ static int lambda_ahead(int multi) {
 			first_iter = 0;
 			continue;
 		}
+		/* NOTE: "ID :" is NOT a safe signal here despite looking unique to
+		 * an attempted bare annotation -- a map literal's key ("{ x: v }")
+		 * is itself parsed through this same general expression path (its
+		 * key going through parse_expr_no_tuple -> lambda_ahead), so "x"
+		 * immediately followed by ':' is the ordinary, extremely common
+		 * bareword-key shape, not evidence of a lambda. Tried committing to
+		 * 1 here for a nicer bare-annotation error message; it broke every
+		 * map literal whose first entry is a bareword key. Left as return 0
+		 * (falls through to a generic parse error for a bare annotation
+		 * attempt) -- correct, just a less specific message. */
 		return 0;
 	}
 #undef LA_SKIPNL
 }
 
-/* parameter: identifier / projection / capture / destructure pattern */
-static ast *parse_parameter(void) {
+/* Lookahead only, cur pointing at "(" (not yet consumed): does this start an
+ * annotated param list -- "(name[: Type], ...) ->"? Scans for a paren-
+ * depth-0 ':' before the matching ")", itself followed by "->". ':' never
+ * appears in ordinary expression grammar (only inside {...} map literals,
+ * a different production) and a nested destructure-pattern param "(a, b)"
+ * has no ':' either, so ANY depth-0 ':' in here unambiguously means this is
+ * an annotated param list -- no false positives, so this only needs to
+ * track '(' / ')' depth (to find the right closing paren), not '<' / '>'
+ * (a generic Type's brackets can't contain ':' or unbalance the parens).
+ * Returns 0 (caller falls through to the existing, unchanged
+ * reinterpretation path) if no such ':' shows up, or the shape doesn't fit. */
+static int annotated_parens_ahead(void) {
+	size_t i = cur;
+	if (i >= p->pos || p->tokens[i].kind != TOK_LPAREN)
+		return 0;
+	i++;
+	int depth = 0;
+	int saw_colon = 0;
+	for (;;) {
+		if (i >= p->pos || p->tokens[i].kind == TOK_EOF)
+			return 0;
+		tok_kind k = p->tokens[i].kind;
+		if (k == TOK_LPAREN) { depth++; i++; continue; }
+		if (k == TOK_RPAREN) {
+			if (depth == 0) break;   /* this is the outer match */
+			depth--; i++; continue;
+		}
+		if (k == TOK_COLON && depth == 0) saw_colon = 1;
+		i++;
+	}
+	if (!saw_colon)
+		return 0;
+	i++;   /* past ")" */
+	while (i < p->pos && p->tokens[i].kind == TOK_NEWLINE) i++;
+	return i < p->pos && p->tokens[i].kind == TOK_ARROW;
+}
+
+/* type annotation, param-position only: NAME, or NAME<TypeExpr, ...> for a
+ * one-level generic (List<Int>, Tuple<Int, String>, ...). Self-contained --
+ * doesn't touch the general expression parser, so no interaction with the
+ * ordinary comparison operators despite reusing '<'/'>'. */
+static ast *parse_type_expr(void) {
+	ast *n = node(AST_TYPEEXPR);
+	n->tok = expect(.kind = TOK_ID);
+	if (accept(.kind = TOK_LT)) {
+		do {
+			skip_nl();
+			push(n, parse_type_expr());
+			skip_nl();
+		} while (accept(.kind = TOK_COMMA));
+		expect(.kind = TOK_GT);
+	}
+	return n;
+}
+
+/* parameter: identifier / projection / capture / destructure pattern.
+ * `allow_type`: whether a plain identifier may carry a `: Type` annotation
+ * here -- true only where the grammar already guarantees parens around the
+ * whole param list (a `type NAME(...)` ctor's params, or the dedicated
+ * annotated-parenthesized-lambda form, see annotated_parens_ahead()) so
+ * annotations never appear in a bare/ambiguous param position. */
+static ast *parse_parameter(int allow_type) {
 	token *t = tok_cur();
 	if (t->kind == TOK_LPAREN) {             /* (a, b): destructure this one
 	                                           * positional argument by field
@@ -1566,6 +1658,14 @@ static ast *parse_parameter(void) {
 	}
 	ast *n = node(AST_ID);                   /* identifier */
 	n->tok = expect(.kind = TOK_ID);
+	if (peek(.kind = TOK_COLON)) {
+		if (!allow_type)
+			die("parameter type annotations require parentheses: (%.*s: Type) -> ... at %d:%d",
+			    (int)n->tok->len, n->tok->string, n->tok->start.line, n->tok->start.col);
+		tok_advance();                   /* ":" */
+		skip_nl();
+		push(n, parse_type_expr());
+	}
 	return n;
 }
 
@@ -1574,7 +1674,7 @@ static ast *parse_lambda(void) {
 	ast *params = node(AST_PARAMS);
 	do {
 		skip_nl();
-		push(params, parse_parameter());
+		push(params, parse_parameter(0));   /* bare list: annotations need parens */
 	} while (sig_kind() == TOK_COMMA && (skip_nl(), accept(.kind = TOK_COMMA)));
 	skip_nl();
 	expect(.kind = TOK_ARROW);
@@ -1616,7 +1716,7 @@ static ast *parse_expression(void) {
 		ast *params = node(AST_PARAMS);
 		skip_nl();
 		if (!peek(.kind = TOK_RPAREN)) {
-			do { skip_nl(); push(params, parse_parameter()); }
+			do { skip_nl(); push(params, parse_parameter(1)); }   /* always parenthesized */
 			while (sig_kind() == TOK_COMMA && (skip_nl(), accept(.kind = TOK_COMMA)));
 			skip_nl();
 		}

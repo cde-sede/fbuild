@@ -169,9 +169,9 @@ int main(int ac, char **av) {
 	 * to finalize the list before fb_dofile calls it again is safe. */
 	if (fb_load_env_plugins(S)) die("%s", fb_error_msg(S));
 	fb_register(S, &(fb_Reg){ "script", cli_global_noncallable, 0, -1, FB_RET_STR, FB_GLOBAL,
-	            "script: String -- path of the running script" });
+	            "script: String -- path of the running script", NULL, 0, NULL });
 	fb_register(S, &(fb_Reg){ "plugins", cli_global_noncallable, 0, -1, FB_RET_LIST_STR, FB_GLOBAL,
-	            "plugins: List<String> -- paths of every loaded plugin" });
+	            "plugins: List<String> -- paths of every loaded plugin", NULL, 0, NULL });
 	fb_global_bind(S, "script", fb_str(S, script));
 	fb_Value plugins = fb_list(S);
 	for (int i = 0; i < fb_plugin_count(S); i++)

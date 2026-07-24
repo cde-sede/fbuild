@@ -83,7 +83,13 @@ method Point3D.* = Point.*
 3. **lambda** `params -> body` (`x -> ...`, `a, b -> ...`, `@rest -> ...`, `.f -> ...`,
    `(a, b) -> ...`: parens around the param list are grouping only, identical
    AST to the unparenthesized form -- allowed only when every element is a
-   plain identifier)
+   plain identifier). A plain-identifier param may carry an optional type
+   annotation, `name: Type` -- but only when the param list is parenthesized,
+   `(x: Int, y: Int) -> ...`; a bare `x: Int -> ...` is a parse error (needs
+   parens). Same rule for `type NAME(params) = ...` constructor params,
+   which are always parenthesized already. `Type` is a bare name (`Int Float
+   String Bool Path File Command Unit`, or any `type NAME(...)` class) or
+   one level of generic, `List<Type>` / `Tuple<Type, Type, ...>`.
 4. **sequence** `a >> b` (ordered; build dependency)
 5. **pipe** `a |> f` (= `f(a)`; maps element-wise over a list/tuple)
 6. **guard** `e where b = v, ... when cond` (also `e when cond`)
