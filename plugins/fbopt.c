@@ -355,26 +355,228 @@ static fb_Value bi_stat_reset(fb_State *S, fb_Value *a, int n) {
 	return fb_bool(S, 1);
 }
 
+/* Hover documentation, same convention as src/builtin_docs.h (core's
+ * centralized table): summary + **Params** + **Returns** + **Example**.
+ * Plugins are separate translation units so this lives locally instead of
+ * sharing that header -- same fb_Reg.doc ABI field either way. */
+
+#define FBDOC_stalem \
+"Memoized `stale()`: a path's mtime is stat'd once per run and reused for every check, instead of stat'd again on each call.\n" \
+"\n" \
+"**Params**\n" \
+"- `target` — the output `File`\n" \
+"- `deps...` — zero or more dependency `File`s\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"run(cmd) when stalem(obj, src, ...HDRS)\n" \
+"```"
+
+#define FBDOC_mtimem \
+"Reads a path's modification time (memoized -- one stat per path per run).\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — a `Path`\n" \
+"\n" \
+"**Returns** `Int` nanoseconds since epoch, or `-1` if missing.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"mtimem('build/app')\n" \
+"```"
+
+#define FBDOC_newest \
+"Finds the most recently modified of several paths (memoized stats).\n" \
+"\n" \
+"**Params**\n" \
+"- `paths...` — one or more `Path`s\n" \
+"\n" \
+"**Returns** the newest `File`, or `nil` if none of them exist.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"newest(...glob('src/*.c'))\n" \
+"```"
+
+#define FBDOC_oldest \
+"Finds the least recently modified of several paths (memoized stats).\n" \
+"\n" \
+"**Params**\n" \
+"- `paths...` — one or more `Path`s\n" \
+"\n" \
+"**Returns** the oldest `File`, or `nil` if none of them exist.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"oldest(...glob('src/*.c'))\n" \
+"```"
+
+#define FBDOC_existsm \
+"Memoized `exists()` -- one stat per path per run.\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — a `Path`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"existsm('build/app')\n" \
+"```"
+
+#define FBDOC_is_filem \
+"Memoized regular-file test -- one stat per path per run.\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — a `Path`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"is_filem('build/app')\n" \
+"```"
+
+#define FBDOC_is_dirm \
+"Memoized directory test -- one stat per path per run.\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — a `Path`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"is_dirm('build')\n" \
+"```"
+
+#define FBDOC_globm \
+"Memoized single-directory glob (`dir/<wildcard>` -- one level, not recursive `**`): each distinct pattern is only read from disk once per run.\n" \
+"\n" \
+"**Params**\n" \
+"- `pattern` — a glob pattern, e.g. `'src/*.c'`\n" \
+"\n" \
+"**Returns** `List<File>`, sorted.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"globm('src/*.c')\n" \
+"```"
+
+#define FBDOC_needed \
+"Filters a list of [obj, src] (or [obj, src, ...] ) unit pairs down to the ones that are stale, sharing one memoized stat cache across every unit and dep -- avoids the O(units x deps) restat a plain `stale()` loop would do.\n" \
+"\n" \
+"**Params**\n" \
+"- `units` — `List` of `[obj, src, ...]` tuples/lists (obj = element 0, src = element 1)\n" \
+"- `deps...` — shared dependencies checked against every unit (e.g. common headers)\n" \
+"\n" \
+"**Returns** the subset of `units` that are stale.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"todo = needed(zip(objs, srcs), ...HDRS)\n" \
+"```"
+
+#define FBDOC_depsm \
+"Parses a compiler-generated `.d` depfile (`cc -MMD`, sibling of the given object file) into its real prerequisite list. Returns an empty list if there's no depfile yet (first build -- the object is missing then anyway, so `stale()` rebuilds regardless).\n" \
+"\n" \
+"**Params**\n" \
+"- `objfile` — the object `Path` (its sibling `.d` is read, e.g. `a.o` -> `a.d`)\n" \
+"\n" \
+"**Returns** `List<File>`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"hdrs = depsm(obj)\n" \
+"```"
+
+#define FBDOC_hashm \
+"Content hash of a file (FNV-1a over its bytes), memoized -- read from disk at most once per run.\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — a `Path`\n" \
+"\n" \
+"**Returns** `Int`, or `0` if missing.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"hashm('src/main.c')\n" \
+"```"
+
+#define FBDOC_stale_hash \
+"Content-based staleness: rebuild if the target is missing, or if any dep's content hash differs from the loaded baseline (see `cache_load`). Immune to mtime churn (touch, checkout, clock skew) -- unlike `stale()`/`stalem()`. With no baseline loaded, everything is stale.\n" \
+"\n" \
+"**Params**\n" \
+"- `target` — the output `File`\n" \
+"- `deps...` — zero or more dependency `File`s\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"cache_load('build/.hashes')\n" \
+"run(cmd) when stale_hash(obj, src)\n" \
+"cache_save('build/.hashes')\n" \
+"```"
+
+#define FBDOC_cache_load \
+"Loads a `stale_hash` baseline (path -> content hash) from a file written by an earlier `cache_save`.\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — the baseline `File`\n" \
+"\n" \
+"**Returns** `Bool` -- `false` if the file couldn't be opened (no prior baseline; everything counts as stale).\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"cache_load('build/.hashes')\n" \
+"```"
+
+#define FBDOC_cache_save \
+"Writes the content hash of every file hashed so far this run (via `stale_hash`/`hashm`) as the next baseline. Call after building, so the next run's `stale_hash` compares against what was actually just built.\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — where to write the baseline\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"cache_save('build/.hashes')\n" \
+"```"
+
+#define FBDOC_stat_reset \
+"Drops the in-memory stat/glob caches (not the loaded `stale_hash` baseline) -- call between phases if a path this run already stat'd was then rebuilt, so the next check re-stats it instead of reusing a stale snapshot.\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"stat_reset()\n" \
+"```"
+
 /* ---- plugin entry points (dlsym'd by fb_load_plugin) ------------------ */
 int fbuild_abi(void) { return FBUILD_ABI; }
 
 int fbuild_open(fb_State *S) {
 	static const fb_Reg regs[] = {
-		{ "stalem", bi_stalem, 1, -1, FB_RET_BOOL, 0, NULL },
-		{ "mtimem", bi_mtimem, 1, 1, FB_RET_INT, 0, NULL },
-		{ "newest", bi_newest, 1, -1, FB_RET_FILE, 0, NULL },
-		{ "oldest", bi_oldest, 1, -1, FB_RET_FILE, 0, NULL },
-		{ "existsm", bi_existsm, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "is_filem", bi_is_filem, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "is_dirm", bi_is_dirm, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "globm", bi_globm, 1, 1, FB_RET_LIST, 0, NULL },
-		{ "needed", bi_needed, 1, -1, FB_RET_LIST, 0, NULL },
-		{ "depsm", bi_depsm, 1, 1, FB_RET_LIST, 0, NULL },
-		{ "hashm", bi_hashm, 1, 1, FB_RET_INT, 0, NULL },
-		{ "stale_hash", bi_stale_hash, 1, -1, FB_RET_BOOL, 0, NULL },
-		{ "cache_load", bi_cache_load, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "cache_save", bi_cache_save, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "stat_reset", bi_stat_reset, 0, 0, FB_RET_BOOL, 0, NULL },
+		{ "stalem", bi_stalem, 1, -1, FB_RET_BOOL, 0, FBDOC_stalem },
+		{ "mtimem", bi_mtimem, 1, 1, FB_RET_INT, 0, FBDOC_mtimem },
+		{ "newest", bi_newest, 1, -1, FB_RET_FILE, 0, FBDOC_newest },
+		{ "oldest", bi_oldest, 1, -1, FB_RET_FILE, 0, FBDOC_oldest },
+		{ "existsm", bi_existsm, 1, 1, FB_RET_BOOL, 0, FBDOC_existsm },
+		{ "is_filem", bi_is_filem, 1, 1, FB_RET_BOOL, 0, FBDOC_is_filem },
+		{ "is_dirm", bi_is_dirm, 1, 1, FB_RET_BOOL, 0, FBDOC_is_dirm },
+		{ "globm", bi_globm, 1, 1, FB_RET_LIST, 0, FBDOC_globm },
+		{ "needed", bi_needed, 1, -1, FB_RET_LIST, 0, FBDOC_needed },
+		{ "depsm", bi_depsm, 1, 1, FB_RET_LIST, 0, FBDOC_depsm },
+		{ "hashm", bi_hashm, 1, 1, FB_RET_INT, 0, FBDOC_hashm },
+		{ "stale_hash", bi_stale_hash, 1, -1, FB_RET_BOOL, 0, FBDOC_stale_hash },
+		{ "cache_load", bi_cache_load, 1, 1, FB_RET_BOOL, 0, FBDOC_cache_load },
+		{ "cache_save", bi_cache_save, 1, 1, FB_RET_BOOL, 0, FBDOC_cache_save },
+		{ "stat_reset", bi_stat_reset, 0, 0, FB_RET_BOOL, 0, FBDOC_stat_reset },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);

@@ -249,27 +249,267 @@ static fb_Value bi_index(fb_State *S, fb_Value *a, int n) {
 	return fb_int(S, -1);
 }
 
+/* Hover documentation, same convention as src/builtin_docs.h (core's
+ * centralized table): summary + **Params** + **Returns** + **Example**.
+ * Plugins are separate translation units so this lives locally instead of
+ * sharing that header -- same fb_Reg.doc ABI field either way. */
+
+#define FBDOC_iter \
+"Builds a list of N elements by repeating a payload -- a lighter-weight `range(n) |> f` when you don't need the index itself, or want to repeat a fixed value/tuple N times.\n" \
+"\n" \
+"**Params**\n" \
+"- `n` — element count\n" \
+"- `args...` — the payload per element: none -> the index `i`; one -> that value repeated; more than one -> a tuple of them repeated\n" \
+"\n" \
+"**Returns** `List`, length `n`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"iter(10) |> i -> print(i)      # calls print(0), print(1), ... print(9)\n" \
+"```"
+
+#define FBDOC_while \
+"Runs a loop body directly each round (no intermediate list, so memory doesn't grow with round count) while a condition stays truthy. The condition is re-evaluated fresh every round, so it must depend on external/mutable state (e.g. `_GLOBALS`) to ever become false.\n" \
+"\n" \
+"**Params**\n" \
+"- `cond` — re-evaluated each round\n" \
+"- `func` — `Int -> any`, called with the round index\n" \
+"\n" \
+"**Returns** `Int` -- the number of rounds run.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"_GLOBALS.n <- 0\n" \
+"while(_GLOBALS.n < 3, i -> (_GLOBALS.n <- _GLOBALS.n + 1))\n" \
+"```"
+
+#define FBDOC_range \
+"Builds a list of consecutive integers.\n" \
+"\n" \
+"**Params**\n" \
+"- `a` — stop (if called with one arg, start defaults to 0), or start (if two args given)\n" \
+"- `b` — stop (only when called with two args)\n" \
+"\n" \
+"**Returns** `List<Int>`, `[start, stop)`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"range(3)      # -> [0, 1, 2]\n" \
+"range(2, 5)   # -> [2, 3, 4]\n" \
+"```"
+
+#define FBDOC_enumerate \
+"Pairs each element with its index.\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — a `List`\n" \
+"\n" \
+"**Returns** `List<Tuple<Int, a>>`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"enumerate(['a', 'b'])   # -> [(0, 'a'), (1, 'b')]\n" \
+"```"
+
+#define FBDOC_slice \
+"Extracts a sub-range of a list. Negative bounds count from the end.\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — a `List`\n" \
+"- `start` — start index, inclusive\n" \
+"- `end` — end index, exclusive\n" \
+"\n" \
+"**Returns** `List`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"slice([1,2,3,4], 1, 3)   # -> [2, 3]\n" \
+"```"
+
+#define FBDOC_take \
+"Takes the first N elements of a list. Negative counts from the end.\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — a `List`\n" \
+"- `n` — element count\n" \
+"\n" \
+"**Returns** `List`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"take([1,2,3,4], 2)    # -> [1, 2]\n" \
+"```"
+
+#define FBDOC_drop \
+"Drops the first N elements of a list, keeping the rest. Negative counts from the end.\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — a `List`\n" \
+"- `n` — element count to drop\n" \
+"\n" \
+"**Returns** `List`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"drop([1,2,3,4], 2)    # -> [3, 4]\n" \
+"```"
+
+#define FBDOC_reverse \
+"Reverses a list's element order.\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — a `List`\n" \
+"\n" \
+"**Returns** a new, reversed `List`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"reverse([1,2,3])   # -> [3, 2, 1]\n" \
+"```"
+
+#define FBDOC_flatten \
+"Flattens one level of nested lists, leaving non-list elements untouched.\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — `List<List<a>>` (or a mix of lists and bare elements)\n" \
+"\n" \
+"**Returns** `List<a>`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"flatten([[1,2],[3],4])   # -> [1, 2, 3, 4]\n" \
+"```"
+
+#define FBDOC_sort \
+"Sorts a list by each element's string representation.\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — a `List`\n" \
+"\n" \
+"**Returns** a new, sorted `List`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"sort(['c', 'a', 'b'])   # -> ['a', 'b', 'c']\n" \
+"```"
+
+#define FBDOC_unique \
+"Removes duplicate elements (compared by string representation), keeping the first occurrence of each.\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — a `List`\n" \
+"\n" \
+"**Returns** `List`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"unique([1, 2, 1, 3, 2])   # -> [1, 2, 3]\n" \
+"```"
+
+#define FBDOC_count \
+"Counts a value's occurrences in a list (compared by string representation).\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — a `List`\n" \
+"- `value` — value to count\n" \
+"\n" \
+"**Returns** `Int`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"count([1, 2, 1, 3], 1)   # -> 2\n" \
+"```"
+
+#define FBDOC_sum \
+"Sums a list of integers -- or pass the numbers directly as varargs (`sum(1,2,3)` == `sum([1,2,3])`).\n" \
+"\n" \
+"**Params**\n" \
+"- `values` — a `List<Int>`, or `Int...` given directly\n" \
+"\n" \
+"**Returns** `Int`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"sum([1, 2, 3])   # -> 6\n" \
+"```"
+
+#define FBDOC_min \
+"Finds the smallest of a list of integers -- or pass the numbers directly as varargs.\n" \
+"\n" \
+"**Params**\n" \
+"- `values` — a `List<Int>`, or `Int...` given directly\n" \
+"\n" \
+"**Returns** `Int`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"min(3, 1, 2)   # -> 1\n" \
+"```"
+
+#define FBDOC_max \
+"Finds the largest of a list of integers -- or pass the numbers directly as varargs.\n" \
+"\n" \
+"**Params**\n" \
+"- `values` — a `List<Int>`, or `Int...` given directly\n" \
+"\n" \
+"**Returns** `Int`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"max(3, 1, 2)   # -> 3\n" \
+"```"
+
+#define FBDOC_fold \
+"Left-folds a list into a single accumulated value.\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — a `List`\n" \
+"- `init` — the accumulator's starting value\n" \
+"- `fn` — `(acc, elem) -> acc`, called once per element\n" \
+"\n" \
+"**Returns** the final accumulator.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"fold([1,2,3], 0, (acc, x) -> acc + x)   # -> 6\n" \
+"```"
+
+#define FBDOC_index \
+"Finds the first index of a value in a list, optionally comparing a derived key instead of the element itself.\n" \
+"\n" \
+"**Params**\n" \
+"- `list` — a `List`\n" \
+"- `value` — value to search for\n" \
+"- `key` — optional `a -> b`, applied to each element before comparing\n" \
+"\n" \
+"**Returns** `Int` -- the index, or `-1` if not found.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"index(['a','bb','ccc'], 2, length)   # -> 1 (length('bb') == 2)\n" \
+"```"
+
 int fbuild_abi(void) { return FBUILD_ABI; }
 
 int fbuild_open(fb_State *S) {
 	static const fb_Reg regs[] = {
-		{ "iter", bi_iter, 1, -1, FB_RET_LIST, 0, NULL },
-		{ "while", bi_while, 2, 2, FB_RET_INT, FB_LAZY, NULL },
-		{ "range", bi_range, 1, 2, FB_RET_LIST, 0, NULL },
-		{ "enumerate", bi_enumerate, 1, 1, FB_RET_LIST, 0, NULL },
-		{ "slice", bi_slice, 3, 3, FB_RET_LIST, 0, NULL },
-		{ "take", bi_take, 2, 2, FB_RET_LIST, 0, NULL },
-		{ "drop", bi_drop, 2, 2, FB_RET_LIST, 0, NULL },
-		{ "reverse", bi_reverse, 1, 1, FB_RET_LIST, 0, NULL },
-		{ "flatten", bi_flatten, 1, 1, FB_RET_LIST, 0, NULL },
-		{ "sort", bi_sort, 1, 1, FB_RET_LIST, 0, NULL },
-		{ "unique", bi_unique, 1, 1, FB_RET_LIST, 0, NULL },
-		{ "count", bi_count, 2, 2, FB_RET_INT, 0, NULL },
-		{ "sum", bi_sum, 1, -1, FB_RET_INT, 0, NULL },
-		{ "min", bi_min, 1, -1, FB_RET_INT, 0, NULL },
-		{ "max", bi_max, 1, -1, FB_RET_INT, 0, NULL },
-		{ "fold", bi_fold, 3, 3, FB_RET_ANY, 0, NULL },
-		{ "index", bi_index, 2, 3, FB_RET_INT, 0, NULL },
+		{ "iter", bi_iter, 1, -1, FB_RET_LIST, 0, FBDOC_iter },
+		{ "while", bi_while, 2, 2, FB_RET_INT, FB_LAZY, FBDOC_while },
+		{ "range", bi_range, 1, 2, FB_RET_LIST, 0, FBDOC_range },
+		{ "enumerate", bi_enumerate, 1, 1, FB_RET_LIST, 0, FBDOC_enumerate },
+		{ "slice", bi_slice, 3, 3, FB_RET_LIST, 0, FBDOC_slice },
+		{ "take", bi_take, 2, 2, FB_RET_LIST, 0, FBDOC_take },
+		{ "drop", bi_drop, 2, 2, FB_RET_LIST, 0, FBDOC_drop },
+		{ "reverse", bi_reverse, 1, 1, FB_RET_LIST, 0, FBDOC_reverse },
+		{ "flatten", bi_flatten, 1, 1, FB_RET_LIST, 0, FBDOC_flatten },
+		{ "sort", bi_sort, 1, 1, FB_RET_LIST, 0, FBDOC_sort },
+		{ "unique", bi_unique, 1, 1, FB_RET_LIST, 0, FBDOC_unique },
+		{ "count", bi_count, 2, 2, FB_RET_INT, 0, FBDOC_count },
+		{ "sum", bi_sum, 1, -1, FB_RET_INT, 0, FBDOC_sum },
+		{ "min", bi_min, 1, -1, FB_RET_INT, 0, FBDOC_min },
+		{ "max", bi_max, 1, -1, FB_RET_INT, 0, FBDOC_max },
+		{ "fold", bi_fold, 3, 3, FB_RET_ANY, 0, FBDOC_fold },
+		{ "index", bi_index, 2, 3, FB_RET_INT, 0, FBDOC_index },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);

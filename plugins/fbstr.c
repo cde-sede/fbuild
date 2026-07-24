@@ -282,41 +282,472 @@ static fb_Value bi_chr(fb_State *S, fb_Value *a, int n) {
 	return fb_str(S, c);
 }
 
+/* Hover documentation, same convention as src/builtin_docs.h (core's
+ * centralized table): summary + **Params** + **Returns** + **Example**.
+ * Plugins are separate translation units so this lives locally instead of
+ * sharing that header -- same fb_Reg.doc ABI field either way. Byte-oriented
+ * throughout this file, like the implementations themselves (no UTF-8
+ * decoding -- one `char` is one byte). */
+
+#define FBDOC_upper \
+"Uppercases every letter.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"upper('abc')   # -> 'ABC'\n" \
+"```"
+
+#define FBDOC_lower \
+"Lowercases every letter.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"lower('ABC')   # -> 'abc'\n" \
+"```"
+
+#define FBDOC_capitalize \
+"Uppercases the first letter, lowercases the rest.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"capitalize('hELLO')   # -> 'Hello'\n" \
+"```"
+
+#define FBDOC_title \
+"Capitalizes the first letter of each whitespace-separated word, lowercasing the rest.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"title('hello world')   # -> 'Hello World'\n" \
+"```"
+
+#define FBDOC_trim \
+"Strips leading and trailing whitespace.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"trim('  hi  ')   # -> 'hi'\n" \
+"```"
+
+#define FBDOC_lstrip \
+"Strips leading whitespace only.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"lstrip('  hi  ')   # -> 'hi  '\n" \
+"```"
+
+#define FBDOC_rstrip \
+"Strips trailing whitespace only.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"rstrip('  hi  ')   # -> '  hi'\n" \
+"```"
+
+#define FBDOC_starts_with \
+"Checks whether a string starts with a given prefix.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `prefix` — prefix to test\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"starts_with('main.c', 'main')   # -> true\n" \
+"```"
+
+#define FBDOC_ends_with \
+"Checks whether a string ends with a given suffix.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `suffix` — suffix to test\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"ends_with('main.c', '.c')   # -> true\n" \
+"```"
+
+#define FBDOC_strip_prefix \
+"Drops a prefix if present, otherwise returns the string unchanged.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `prefix` — prefix to drop\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"strip_prefix('src/main.c', 'src/')   # -> 'main.c'\n" \
+"```"
+
+#define FBDOC_strip_suffix \
+"Drops a suffix if present, otherwise returns the string unchanged.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `suffix` — suffix to drop\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"strip_suffix('main.c', '.c')   # -> 'main'\n" \
+"```"
+
+#define FBDOC_find \
+"Finds the first occurrence of a substring, at or after an optional starting byte offset.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `sub` — substring to search for\n" \
+"- `from` — optional starting byte offset (default 0; negative counts from the end)\n" \
+"\n" \
+"**Returns** `Int` -- the byte index, or `-1` if not found.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"find('a.b.c', '.')      # -> 1\n" \
+"find('a.b.c', '.', 2)   # -> 3\n" \
+"```"
+
+#define FBDOC_rfind \
+"Finds the last occurrence of a substring.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `sub` — substring to search for\n" \
+"\n" \
+"**Returns** `Int` -- the byte index, or `-1` if not found.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"rfind('a.b.c', '.')   # -> 3\n" \
+"```"
+
+#define FBDOC_occurrences \
+"Counts non-overlapping occurrences of a substring.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `sub` — substring to count\n" \
+"\n" \
+"**Returns** `Int`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"occurrences('aaaa', 'aa')   # -> 2\n" \
+"```"
+
+#define FBDOC_repeat \
+"Repeats a string N times.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `n` — repeat count\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"repeat('ab', 3)   # -> 'ababab'\n" \
+"```"
+
+#define FBDOC_chars \
+"Splits a string into its individual (one-byte) characters.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `List<String>`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"chars('abc')   # -> ['a', 'b', 'c']\n" \
+"```"
+
+#define FBDOC_words \
+"Splits on whitespace runs, dropping empty tokens and leading/trailing space -- unlike `split(s, ' ')`, which keeps them.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `List<String>`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"words('  a   b  ')   # -> ['a', 'b']\n" \
+"```"
+
+#define FBDOC_partition \
+"Splits a string on the first occurrence of a separator into a (before, sep, after) triple. If the separator isn't found, returns `(s, '', '')`.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `sep` — separator to split on\n" \
+"\n" \
+"**Returns** `Tuple<String, String, String>`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"partition('key=value', '=')   # -> ('key', '=', 'value')\n" \
+"```"
+
+#define FBDOC_substr \
+"Extracts a `[start, end)` byte range. Negative bounds count from the end.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `start` — start byte offset\n" \
+"- `end` — optional end byte offset (default: the string's length)\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"substr('hello', 1, 3)   # -> 'el'\n" \
+"```"
+
+#define FBDOC_replace \
+"Replaces every occurrence of a substring with another.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `from` — substring to find\n" \
+"- `to` — replacement text\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"replace('a-b-c', '-', '_')   # -> 'a_b_c'\n" \
+"```"
+
+#define FBDOC_pad_left \
+"Right-justifies a string to a given width by padding on the left.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `width` — target width\n" \
+"- `fill` — optional single-char fill (default `' '`)\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"pad_left('7', 3, '0')   # -> '007'\n" \
+"```"
+
+#define FBDOC_pad_right \
+"Left-justifies a string to a given width by padding on the right.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `width` — target width\n" \
+"- `fill` — optional single-char fill (default `' '`)\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"pad_right('7', 3, '0')   # -> '700'\n" \
+"```"
+
+#define FBDOC_center \
+"Centers a string within a given width, padding both sides.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"- `width` — target width\n" \
+"- `fill` — optional single-char fill (default `' '`)\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"center('hi', 6, '-')   # -> '--hi--'\n" \
+"```"
+
+#define FBDOC_is_alpha \
+"Checks whether a string is non-empty and every byte is a letter.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"is_alpha('abc')   # -> true\n" \
+"```"
+
+#define FBDOC_is_digit \
+"Checks whether a string is non-empty and every byte is a digit.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"is_digit('123')   # -> true\n" \
+"```"
+
+#define FBDOC_is_alnum \
+"Checks whether a string is non-empty and every byte is alphanumeric.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"is_alnum('abc123')   # -> true\n" \
+"```"
+
+#define FBDOC_is_space \
+"Checks whether a string is non-empty and every byte is whitespace.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"is_space('   ')   # -> true\n" \
+"```"
+
+#define FBDOC_is_upper \
+"Checks whether a string has at least one cased letter and no lowercase letters (digits/punctuation don't count either way).\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"is_upper('ABC123')   # -> true\n" \
+"```"
+
+#define FBDOC_is_lower \
+"Checks whether a string has at least one cased letter and no uppercase letters (digits/punctuation don't count either way).\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a `String`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"is_lower('abc123')   # -> true\n" \
+"```"
+
+#define FBDOC_ord \
+"Reads the byte value of a string's first character.\n" \
+"\n" \
+"**Params**\n" \
+"- `s` — a non-empty `String`\n" \
+"\n" \
+"**Returns** `Int`, `0`-`255`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"ord('A')   # -> 65\n" \
+"```"
+
+#define FBDOC_chr \
+"Builds a one-byte string from a byte code.\n" \
+"\n" \
+"**Params**\n" \
+"- `code` — `Int`, `0`-`255`\n" \
+"\n" \
+"**Returns** `String`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"chr(65)   # -> 'A'\n" \
+"```"
+
 int fbuild_abi(void) { return FBUILD_ABI; }
 
 int fbuild_open(fb_State *S) {
 	static const fb_Reg regs[] = {
-		{ "upper", bi_upper, 1, 1, FB_RET_STR, 0, NULL },
-		{ "lower", bi_lower, 1, 1, FB_RET_STR, 0, NULL },
-		{ "capitalize", bi_capitalize, 1, 1, FB_RET_STR, 0, NULL },
-		{ "title", bi_title, 1, 1, FB_RET_STR, 0, NULL },
-		{ "trim", bi_trim, 1, 1, FB_RET_STR, 0, NULL },
-		{ "lstrip", bi_lstrip, 1, 1, FB_RET_STR, 0, NULL },
-		{ "rstrip", bi_rstrip, 1, 1, FB_RET_STR, 0, NULL },
-		{ "starts_with", bi_starts_with, 2, 2, FB_RET_BOOL, 0, NULL },
-		{ "ends_with", bi_ends_with, 2, 2, FB_RET_BOOL, 0, NULL },
-		{ "strip_prefix", bi_strip_prefix, 2, 2, FB_RET_STR, 0, NULL },
-		{ "strip_suffix", bi_strip_suffix, 2, 2, FB_RET_STR, 0, NULL },
-		{ "find", bi_find, 2, 3, FB_RET_INT, 0, NULL },
-		{ "rfind", bi_rfind, 2, 2, FB_RET_INT, 0, NULL },
-		{ "occurrences", bi_occurrences, 2, 2, FB_RET_INT, 0, NULL },
-		{ "repeat", bi_repeat, 2, 2, FB_RET_STR, 0, NULL },
-		{ "chars", bi_chars, 1, 1, FB_RET_LIST, 0, NULL },
-		{ "words", bi_words, 1, 1, FB_RET_LIST, 0, NULL },
-		{ "partition", bi_partition, 2, 2, FB_RET_ANY, 0, NULL },
-		{ "substr", bi_substr, 2, 3, FB_RET_STR, 0, NULL },
-		{ "replace", bi_replace, 3, 3, FB_RET_STR, 0, NULL },
-		{ "pad_left", bi_pad_left, 2, 3, FB_RET_STR, 0, NULL },
-		{ "pad_right", bi_pad_right, 2, 3, FB_RET_STR, 0, NULL },
-		{ "center", bi_center, 2, 3, FB_RET_STR, 0, NULL },
-		{ "is_alpha", bi_is_alpha, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "is_digit", bi_is_digit, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "is_alnum", bi_is_alnum, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "is_space", bi_is_space, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "is_upper", bi_is_upper, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "is_lower", bi_is_lower, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "ord", bi_ord, 1, 1, FB_RET_INT, 0, NULL },
-		{ "chr", bi_chr, 1, 1, FB_RET_STR, 0, NULL },
+		{ "upper", bi_upper, 1, 1, FB_RET_STR, 0, FBDOC_upper },
+		{ "lower", bi_lower, 1, 1, FB_RET_STR, 0, FBDOC_lower },
+		{ "capitalize", bi_capitalize, 1, 1, FB_RET_STR, 0, FBDOC_capitalize },
+		{ "title", bi_title, 1, 1, FB_RET_STR, 0, FBDOC_title },
+		{ "trim", bi_trim, 1, 1, FB_RET_STR, 0, FBDOC_trim },
+		{ "lstrip", bi_lstrip, 1, 1, FB_RET_STR, 0, FBDOC_lstrip },
+		{ "rstrip", bi_rstrip, 1, 1, FB_RET_STR, 0, FBDOC_rstrip },
+		{ "starts_with", bi_starts_with, 2, 2, FB_RET_BOOL, 0, FBDOC_starts_with },
+		{ "ends_with", bi_ends_with, 2, 2, FB_RET_BOOL, 0, FBDOC_ends_with },
+		{ "strip_prefix", bi_strip_prefix, 2, 2, FB_RET_STR, 0, FBDOC_strip_prefix },
+		{ "strip_suffix", bi_strip_suffix, 2, 2, FB_RET_STR, 0, FBDOC_strip_suffix },
+		{ "find", bi_find, 2, 3, FB_RET_INT, 0, FBDOC_find },
+		{ "rfind", bi_rfind, 2, 2, FB_RET_INT, 0, FBDOC_rfind },
+		{ "occurrences", bi_occurrences, 2, 2, FB_RET_INT, 0, FBDOC_occurrences },
+		{ "repeat", bi_repeat, 2, 2, FB_RET_STR, 0, FBDOC_repeat },
+		{ "chars", bi_chars, 1, 1, FB_RET_LIST, 0, FBDOC_chars },
+		{ "words", bi_words, 1, 1, FB_RET_LIST, 0, FBDOC_words },
+		{ "partition", bi_partition, 2, 2, FB_RET_ANY, 0, FBDOC_partition },
+		{ "substr", bi_substr, 2, 3, FB_RET_STR, 0, FBDOC_substr },
+		{ "replace", bi_replace, 3, 3, FB_RET_STR, 0, FBDOC_replace },
+		{ "pad_left", bi_pad_left, 2, 3, FB_RET_STR, 0, FBDOC_pad_left },
+		{ "pad_right", bi_pad_right, 2, 3, FB_RET_STR, 0, FBDOC_pad_right },
+		{ "center", bi_center, 2, 3, FB_RET_STR, 0, FBDOC_center },
+		{ "is_alpha", bi_is_alpha, 1, 1, FB_RET_BOOL, 0, FBDOC_is_alpha },
+		{ "is_digit", bi_is_digit, 1, 1, FB_RET_BOOL, 0, FBDOC_is_digit },
+		{ "is_alnum", bi_is_alnum, 1, 1, FB_RET_BOOL, 0, FBDOC_is_alnum },
+		{ "is_space", bi_is_space, 1, 1, FB_RET_BOOL, 0, FBDOC_is_space },
+		{ "is_upper", bi_is_upper, 1, 1, FB_RET_BOOL, 0, FBDOC_is_upper },
+		{ "is_lower", bi_is_lower, 1, 1, FB_RET_BOOL, 0, FBDOC_is_lower },
+		{ "ord", bi_ord, 1, 1, FB_RET_INT, 0, FBDOC_ord },
+		{ "chr", bi_chr, 1, 1, FB_RET_STR, 0, FBDOC_chr },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);

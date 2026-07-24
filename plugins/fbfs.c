@@ -80,16 +80,101 @@ static fb_Value bi_is_file(fb_State *S, fb_Value *a, int n) {
 	return fb_bool(S, stat(P(a[0]), &st) == 0 && S_ISREG(st.st_mode));
 }
 
+/* Hover documentation, same convention as src/builtin_docs.h (core's
+ * centralized table): summary + **Params** + **Returns** + **Example**.
+ * Plugins are separate translation units so this lives locally instead of
+ * sharing that header -- same fb_Reg.doc ABI field either way. */
+
+#define FBDOC_move \
+"Renames a file (falls back to copy + delete if the rename crosses filesystems).\n" \
+"\n" \
+"**Params**\n" \
+"- `src` — source `Path`\n" \
+"- `dst` — destination `Path`\n" \
+"\n" \
+"**Returns** the destination `File`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"move('build/app', 'dist/app')\n" \
+"```"
+
+#define FBDOC_symlink \
+"Creates (or replaces) a symlink.\n" \
+"\n" \
+"**Params**\n" \
+"- `target` — the link's target `Path`\n" \
+"- `link` — path of the symlink to create\n" \
+"\n" \
+"**Returns** the link's `File`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"symlink('app-1.2.3', 'app-latest')\n" \
+"```"
+
+#define FBDOC_remove \
+"Deletes a file, or an empty directory.\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — a `Path`\n" \
+"\n" \
+"**Returns** `Bool` -- whether anything was removed.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"remove('build/tmp.o')\n" \
+"```"
+
+#define FBDOC_touch \
+"Creates an empty file if it doesn't exist, and bumps its mtime to now either way.\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — a `Path`\n" \
+"\n" \
+"**Returns** the `File`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"touch('build/.stamp')\n" \
+"```"
+
+#define FBDOC_is_dir \
+"Checks whether a path exists and is a directory.\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — a `Path`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"is_dir('build')\n" \
+"```"
+
+#define FBDOC_is_file \
+"Checks whether a path exists and is a regular file.\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — a `Path`\n" \
+"\n" \
+"**Returns** `Bool`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"is_file('build/app')\n" \
+"```"
+
 int fbuild_abi(void) { return FBUILD_ABI; }
 
 int fbuild_open(fb_State *S) {
 	static const fb_Reg regs[] = {
-		{ "move", bi_move, 2, 2, FB_RET_FILE, 0, NULL },
-		{ "symlink", bi_symlink, 2, 2, FB_RET_FILE, 0, NULL },
-		{ "remove", bi_remove, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "touch", bi_touch, 1, 1, FB_RET_FILE, 0, NULL },
-		{ "is_dir", bi_is_dir, 1, 1, FB_RET_BOOL, 0, NULL },
-		{ "is_file", bi_is_file, 1, 1, FB_RET_BOOL, 0, NULL },
+		{ "move", bi_move, 2, 2, FB_RET_FILE, 0, FBDOC_move },
+		{ "symlink", bi_symlink, 2, 2, FB_RET_FILE, 0, FBDOC_symlink },
+		{ "remove", bi_remove, 1, 1, FB_RET_BOOL, 0, FBDOC_remove },
+		{ "touch", bi_touch, 1, 1, FB_RET_FILE, 0, FBDOC_touch },
+		{ "is_dir", bi_is_dir, 1, 1, FB_RET_BOOL, 0, FBDOC_is_dir },
+		{ "is_file", bi_is_file, 1, 1, FB_RET_BOOL, 0, FBDOC_is_file },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);

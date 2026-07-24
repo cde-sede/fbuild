@@ -100,6 +100,30 @@ static fb_Value m_close(fb_State *S, fb_Value *a, int n) {
 	return fb_bool(S, rc);
 }
 
+/* Hover documentation, same convention as src/builtin_docs.h (core's
+ * centralized table): summary + **Params** + **Returns** + **Example**.
+ * Plugins are separate translation units so this lives locally instead of
+ * sharing that header -- same fb_Reg.doc ABI field either way. Only the
+ * `stream` constructor goes through fb_Reg -- its .write/.writeln/
+ * .writelines/.flush/.close methods are native class dispatch (fb_method),
+ * not individually documentable this way. */
+
+#define FBDOC_stream \
+"Opens a file for incremental writing -- build it up line by line without holding the whole content in a String first, unlike core's `write(path, str)` (one atomic whole-content write). Returns a `Stream` object with `.write(s)`, `.writeln(s)`, `.writelines(list)`, `.flush()`, `.close()` methods (each chainable except flush/close, which return `Bool`).\n" \
+"\n" \
+"**Params**\n" \
+"- `path` — a `Path` to open\n" \
+"- `mode` — optional: `\"w\"` (default, truncate) or `\"a\"` (append)\n" \
+"\n" \
+"**Returns** a `Stream`.\n" \
+"\n" \
+"**Example**\n" \
+"```\n" \
+"s = stream('out.txt')\n" \
+"s.writeln('# generated')\n" \
+"s.close()\n" \
+"```"
+
 int fbuild_abi(void) { return FBUILD_ABI; }
 
 int fbuild_open(fb_State *S) {
@@ -111,7 +135,7 @@ int fbuild_open(fb_State *S) {
 	fb_method(S, STREAM_CLS, "close",      m_close);
 
 	static const fb_Reg regs[] = {
-		{ "stream", bi_stream, 1, 2, FB_RET_ANY, 0, NULL },
+		{ "stream", bi_stream, 1, 2, FB_RET_ANY, 0, FBDOC_stream },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);
