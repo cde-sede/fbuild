@@ -62,6 +62,7 @@
 	X(vkGetPhysicalDeviceFormatProperties) \
 	X(vkGetPhysicalDeviceMemoryProperties) \
 	X(vkGetPhysicalDeviceQueueFamilyProperties) \
+	X(vkEnumerateDeviceExtensionProperties) \
 	X(vkGetPhysicalDeviceSurfaceSupportKHR) \
 	X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
 	X(vkGetPhysicalDeviceSurfaceFormatsKHR) \
@@ -387,6 +388,17 @@ static fb_Value bi_devices(fb_State *S, fb_Value *a, int n) {
 		fb_set(S, features, "fill_mode_non_solid", fb_bool(S, feats.fillModeNonSolid));
 		fb_set(S, features, "shader_float64", fb_bool(S, feats.shaderFloat64));
 		fb_set(S, dev, "features", features);
+
+		uint32_t ext_count = 0;
+		fn.vkEnumerateDeviceExtensionProperties(devs[i], NULL, &ext_count, NULL);
+		VkExtensionProperties *exts = malloc(sizeof(*exts) * (ext_count ? ext_count : 1));
+		VkResult er = fn.vkEnumerateDeviceExtensionProperties(devs[i], NULL, &ext_count, exts);
+		fb_Value extensions = fb_list(S);
+		if (er == VK_SUCCESS)
+			for (uint32_t e = 0; e < ext_count; e++)
+				fb_push(S, extensions, fb_str(S, exts[e].extensionName));
+		free(exts);
+		fb_set(S, dev, "extensions", extensions);
 
 		fb_push(S, list, dev);
 	}
@@ -1451,10 +1463,11 @@ int fbuild_open(fb_State *S) {
 	                     "open a window + Vulkan instance/device/swapchain/render pass, ready to draw",
 	                     app_params, 4, "App", NULL, NULL });
 	fb_class_field(S, DEVICE_CLS, "features", FB_RET_MAP, NULL);
+	fb_class_field(S, DEVICE_CLS, "extensions", FB_RET_LIST_STR, NULL);
 	fb_method(S, VK_CLS, "devices", bi_devices,
 	          &(fb_Reg){ "devices", bi_devices, 0, 0, FB_RET_LIST, 0,
 	                     "enumerate Vulkan-capable GPUs (no window needed): name, type, vram, "
-	                     "api_version, driver_version, limits, features", NULL, 0, NULL, NULL, NULL });
+	                     "api_version, driver_version, limits, features, extensions", NULL, 0, NULL, NULL, NULL });
 	fb_method(S, VK_CLS, "api_version", bi_api_version,
 	          &(fb_Reg){ "api_version", bi_api_version, 0, 0, FB_RET_STR, 0,
 	                     "Vulkan loader/instance API version (\"major.minor.patch\"); no window needed",
@@ -1486,8 +1499,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 73 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    85 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 74 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    87 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -1878,7 +1891,7 @@ int fbuild_open(fb_State *S) {
  * [x] vkDeviceWaitIdle
  * [ ] vkDisplayPowerControlEXT
  * [x] vkEndCommandBuffer
- * [ ] vkEnumerateDeviceExtensionProperties
+ * [x] vkEnumerateDeviceExtensionProperties
  * [ ] vkEnumerateDeviceLayerProperties
  * [ ] vkEnumerateInstanceExtensionProperties
  * [x] vkEnumerateInstanceLayerProperties
@@ -2507,7 +2520,7 @@ int fbuild_open(fb_State *S) {
  * [ ] PFN_vkDeviceWaitIdle
  * [ ] PFN_vkDisplayPowerControlEXT
  * [ ] PFN_vkEndCommandBuffer
- * [ ] PFN_vkEnumerateDeviceExtensionProperties
+ * [x] PFN_vkEnumerateDeviceExtensionProperties
  * [ ] PFN_vkEnumerateDeviceLayerProperties
  * [ ] PFN_vkEnumerateInstanceExtensionProperties
  * [ ] PFN_vkEnumerateInstanceLayerProperties
@@ -3185,7 +3198,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkExportMemoryAllocateInfoNV
  * [ ] VkExportSemaphoreCreateInfo
  * [ ] VkExportSemaphoreCreateInfoKHR
- * [ ] VkExtensionProperties
+ * [x] VkExtensionProperties
  * [x] VkExtent2D
  * [ ] VkExtent3D
  * [ ] VkExternalBufferProperties
