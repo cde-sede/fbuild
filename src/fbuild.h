@@ -17,7 +17,7 @@
 #include <stddef.h>
 #include "ast.h"   /* ast, fb_Diag/fb_Severity -- needed by fb_check() below */
 
-#define FBUILD_ABI 4              /* bump on any incompatible ABI change */
+#define FBUILD_ABI 5              /* bump on any incompatible ABI change */
 
 typedef struct fb_State fb_State; /* opaque interpreter state            */
 typedef struct fb_val  *fb_Value; /* opaque value handle (arena-owned)   */
@@ -56,6 +56,18 @@ typedef enum {
 	                    * entry (below) as much as `ret` itself */
 } fb_Ret;
 
+/* An arbitrary union of >= 2 fb_Ret members for one return/param slot, e.g.
+ * { FB_RET_INT, FB_RET_STR } for a language-level `Int|String`. FB_RET_NUM
+ * stays the common Int|Float shorthand for a single slot (no allocation
+ * needed); reach for fb_RetUnion when the union isn't just Int|Float, or
+ * has more than two members. Members are plain fb_Ret (no nested unions,
+ * matching the language-level grammar, which flattens A|B|C too). Point a
+ * static const array at `members` -- fb_Reg only borrows the pointer. */
+typedef struct {
+	const fb_Ret *members;
+	int           nmembers;
+} fb_RetUnion;
+
 /* A builtin: by default receives its already-evaluated arguments (splats
  * flattened). With FB_LAZY the args arrive UNEVALUATED as thunks (splats are
  * NOT flattened, one thunk per source argument) and the builtin decides what to
@@ -86,7 +98,19 @@ typedef fb_Value (*fb_CFunction)(fb_State *S, fb_Value *args, int nargs);
  * instance of that native class" instead, letting the checker/hover treat
  * it like a language-level `type NAME(...)` instance (nameable, and its
  * fb_method()-registered methods become recognized field accesses) rather
- * than a bare `ret`-typed value. Takes priority over `ret` when set. */
+ * than a bare `ret`-typed value. Takes priority over `ret` when set.
+ * `ret_union`/`param_type_unions` are optional, for a slot that's a real
+ * A|B|C union rather than one fb_Ret: `ret_union` (non-NULL) takes priority
+ * over both `ret` and `ret_class` for the return type. `param_type_unions`,
+ * if set, is a `nparams`-length array parallel to `param_types`; a NULL
+ * entry means "use param_types[i]" as usual, a non-NULL entry overrides
+ * that slot with the union.
+ * A per-argument counterpart to `ret_class` (a param that must be an
+ * instance of a native class, e.g. a Pipeline/Buffer/Shader param) is NOT a
+ * field here -- see fb_reg_param_class() below instead, a separate call
+ * keyed by this registration's own `name` string, so growing this struct
+ * (an ABI break needing an FBUILD_ABI bump + every plugin recompiled) isn't
+ * needed just to add one more optional per-param annotation. */
 typedef struct {
 	const char   *name;
 	fb_CFunction  fn;
@@ -97,6 +121,8 @@ typedef struct {
 	const fb_Ret *param_types; /* optional: per-argument types, or NULL */
 	int           nparams;     /* length of param_types; ignored if NULL */
 	const char   *ret_class;   /* optional: native class name, or NULL */
+	const fb_RetUnion            *ret_union;          /* optional, see above */
+	const fb_RetUnion *const     *param_type_unions;  /* optional, see above */
 } fb_Reg;
 
 /* Evaluate a thunk argument passed to an FB_LAZY builtin (returns it unchanged
@@ -148,10 +174,12 @@ typedef struct fb_class *fb_Class;
 
 fb_Class fb_class (fb_State *S, const char *name);   /* find or create a class */
 /* `meta` is optional (NULL: bind only, no type/hover info). When given, only
- * min/max/ret/doc/param_types/nparams/ret_class are read (name/fn/flags
- * ignored --
+ * min/max/ret/doc/param_types/nparams/ret_class/ret_union/param_type_unions
+ * are read (name/fn/flags ignored --
  * name/fn are already the two params right before it; a method's a plain
- * callable, not GLOBAL).
+ * callable, not GLOBAL). To ALSO type a param as an instance of a native
+ * class (fb_reg_param_class's job), call it after this fb_method with the
+ * shadow-registered name this builds: "ClassName.methodname".
  * If `c`'s own name equals the identifier this class's instance ends up
  * bound to via fb_global_bind (the singleton-namespace pattern, e.g. `math`/
  * `regex` -- see fb_global_bind below), fb_method ALSO registers a shadow
@@ -167,6 +195,21 @@ void     fb_method(fb_State *S, fb_Class c, const char *name, fb_CFunction fn,
                     const fb_Reg *meta);
 fb_Value fb_object(fb_State *S, fb_Class c, void *data); /* instance + native data */
 void    *fb_object_data(fb_Value obj);               /* the native data (or NULL) */
+
+/* Declare a plain DATA field (an fb_set() field written at construction, not
+ * a method) on a native class, e.g. stream()'s "path" or an App's "title" --
+ * so the checker recognizes `obj.field` on that class instead of flagging a
+ * legitimate field as unknown. Without this, any class with >=1 fb_method()
+ * becomes "closed" for the checker (fb_reg_has_class true) and a plain
+ * fb_set() field on an instance of it fails to type-check as a missing
+ * field -- this is the fix for that gap, register every fb_set() field a
+ * constructor writes. `type` is a plain fb_Ret (FB_RET_ANY if you don't want
+ * to commit to one); `ret_class`, if non-NULL, types the field as an
+ * instance of that native class instead (same convention as fb_Reg.ret_class,
+ * and takes priority over `type` when both would apply). Order/timing vs.
+ * fb_method doesn't matter. Last declaration for a given (class, name) wins. */
+void     fb_class_field(fb_State *S, fb_Class c, const char *name, fb_Ret type,
+                         const char *ret_class);
 
 /* Bind `v` to a bare top-level identifier so scripts can reference it by name
  * with no construction step, e.g. a stateless namespace object exposing only
@@ -229,6 +272,30 @@ int fb_reg_class_methods(const char *class_name, const fb_Reg **out, int max_out
  * fb_reg_at returns NULL if i is out of range. */
 int           fb_reg_count(fb_State *S);
 const fb_Reg *fb_reg_at   (fb_State *S, int i);
+
+/* Was class_name.field_name declared via fb_class_field()? Fills *out_ret /
+ * *out_ret_class (either may be NULL) and returns 1 if so, else returns 0
+ * and leaves them untouched. Used by the checker to let a closed native
+ * class's legitimate fb_set() fields through record_field() misses. */
+int fb_native_field_type(const char *class_name, const char *field_name,
+                          fb_Ret *out_ret, const char **out_ret_class);
+
+/* Declare that parameter `index` (0-based, self excluded -- same counting as
+ * fb_Reg.min/max and fb_method's own arity) of a builtin/method registered
+ * under `reg_name` (its plain fb_register `name`, or fb_method's shadow
+ * "ClassName.method" string) must be an instance of native class
+ * `class_name`. Checker-only (signature/hover + call-site arg checking);
+ * no runtime effect, and no ordering requirement vs. the fb_register/
+ * fb_method call it annotates. This is how a param gets the per-argument
+ * equivalent of `ret_class` without fb_Reg itself growing a field for it
+ * (which would force an FBUILD_ABI bump + recompiling every plugin just to
+ * add one more optional per-param annotation -- not worth it for something
+ * checker-only). Process-global like `_SHARED` (not per-fb_State): purely
+ * checker metadata, never consulted at runtime, so cross-state visibility
+ * is harmless. */
+void fb_reg_param_class(const char *reg_name, int index, const char *class_name);
+/* class_name for reg_name's parameter `index`, or NULL if never declared. */
+const char *fb_reg_param_class_at(const char *reg_name, int index);
 
 /* ---- value constructors ----------------------------------------------- */
 fb_Value fb_nil (fb_State *S);

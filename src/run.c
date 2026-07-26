@@ -998,6 +998,31 @@ static rval *class_method(rval *c, const char *name) {
 	return NULL;
 }
 
+/* fb_class_field: declared native DATA fields (fb_set() fields, not methods)
+ * live in the SAME class rval's map slots as methods (class_add_method),
+ * under a key no real identifier can ever collide with ('\x01' isn't a valid
+ * identifier byte) -- piggybacks the class rval's existing per-fb_State
+ * snapshot/restore (g_classes) for free, no separate global table needed.
+ * Value stored is a 2-tuple (Int ret, ret_class Str|Unit), read back by
+ * fb_native_field_type(). */
+static void class_add_field(rval *c, const char *name, fb_Ret ret, const char *ret_class) {
+	char *key = a_alloc(strlen(name) + 4);
+	sprintf(key, "\x01f:%s", name);
+	rval *info = rv(RV_TUPLE);
+	rv_push(info, rv_int((long)ret));
+	rv_push(info, ret_class ? rv_str(a_dup(ret_class)) : rv(RV_NONE));
+	class_add_method(c, key, info);   /* same map-slot storage, distinct key namespace */
+}
+static rval *class_field_info(rval *c, const char *name) {
+	if (!c) return NULL;
+	char stackkey[128];
+	char *key = stackkey;
+	size_t need = strlen(name) + 4;
+	if (need > sizeof stackkey) key = a_alloc(need);
+	sprintf(key, "\x01f:%s", name);
+	return class_method(c, key);
+}
+
 /* true when every entry in a `{ "k": v, ... }` fields body is a plain
  * AST_TUPLE(key, value) with a literal, non-interpolated string key -- a
  * bareword or shorthand key desugars to this shape too (see TOK_LBRACE in
@@ -1047,15 +1072,19 @@ void fb_method(fb_State *S, fb_Class c, const char *name, fb_CFunction fn,
 	 * identifier token), so it's unreachable through ordinary call dispatch
 	 * despite reusing the real `fn` pointer (simpler than a dummy stub, and
 	 * fb_register rejects a NULL fn outright). min/max/ret/doc/param_types/
-	 * nparams/ret_class are the only fields actually read; name/fn are
-	 * already this call's own params, and a method is never FB_GLOBAL. */
+	 * nparams/ret_class/ret_union/param_type_unions are the only fields
+	 * actually read; name/fn are already this call's own params, and a
+	 * method is never FB_GLOBAL. */
 	rval *cls = (rval *)c;
 	size_t cn = strlen(cls->s), mn = strlen(name);
 	char *key = a_alloc(cn + 1 + mn + 1);
 	sprintf(key, "%s.%s", cls->s, name);
-	fb_register(S, &(fb_Reg){ key, fn, meta->min, meta->max, meta->ret, 0,
-	                          meta->doc, meta->param_types, meta->nparams,
-	                          meta->ret_class });
+	fb_register(S, &(fb_Reg){ .name = key, .fn = fn, .min = meta->min,
+	                          .max = meta->max, .ret = meta->ret,
+	                          .doc = meta->doc, .param_types = meta->param_types,
+	                          .nparams = meta->nparams, .ret_class = meta->ret_class,
+	                          .ret_union = meta->ret_union,
+	                          .param_type_unions = meta->param_type_unions });
 }
 fb_Value fb_object(fb_State *S, fb_Class c, void *data) {
 	fb_activate(S); return (fb_Value)make_object((rval *)c, NULL, data);
@@ -1063,6 +1092,46 @@ fb_Value fb_object(fb_State *S, fb_Class c, void *data) {
 void *fb_object_data(fb_Value v) {
 	rval *r = (rval *)v;
 	return (r && r->k == RV_OBJECT) ? r->nat : NULL;
+}
+void fb_class_field(fb_State *S, fb_Class c, const char *name, fb_Ret type,
+                     const char *ret_class) {
+	fb_activate(S);
+	class_add_field((rval *)c, name, type, ret_class);
+}
+int fb_native_field_type(const char *class_name, const char *field_name,
+                          fb_Ret *out_ret, const char **out_ret_class) {
+	rval *c = class_find(class_name);
+	rval *info = c ? class_field_info(c, field_name) : NULL;
+	if (!info) return 0;
+	if (out_ret) *out_ret = (fb_Ret)info->items[0]->i;
+	if (out_ret_class) *out_ret_class = info->items[1]->k == RV_STR ? info->items[1]->s : NULL;
+	return 1;
+}
+
+/* fb_reg_param_class: checker-only per-param native-class annotations, kept
+ * OUTSIDE fb_Reg (see fbuild.h) -- a small process-global list (deliberately
+ * not per-fb_State/g_classes-hung like class_add_field: it's not reachable
+ * from any class rval, only from a plain registry-name string). */
+typedef struct fb_pclass_ent {
+	char *reg_name;
+	int   index;
+	char *class_name;
+	struct fb_pclass_ent *next;
+} fb_pclass_ent;
+static fb_pclass_ent *g_pclasses;
+
+void fb_reg_param_class(const char *reg_name, int index, const char *class_name) {
+	fb_pclass_ent *e = a_alloc(sizeof *e);
+	e->reg_name = a_dup(reg_name);
+	e->index = index;
+	e->class_name = a_dup(class_name);
+	e->next = g_pclasses;
+	g_pclasses = e;
+}
+const char *fb_reg_param_class_at(const char *reg_name, int index) {
+	for (fb_pclass_ent *e = g_pclasses; e; e = e->next)
+		if (e->index == index && !strcmp(e->reg_name, reg_name)) return e->class_name;
+	return NULL;
 }
 
 /* ---- more builtins ---------------------------------------------------- */

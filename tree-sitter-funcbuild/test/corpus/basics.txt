@@ -155,9 +155,10 @@ method Point.get = self -> self.x
   (statement
     (type_definition
       name: (identifier)
-      (parameter_list
-        (parameter
-          (identifier)))
+      (ctor_parameter_list
+        (ctor_parameter
+          (parameter
+            (identifier))))
       value: (expression
         (map
           (map_entry
@@ -179,3 +180,47 @@ method Point.get = self -> self.x
               (field_suffix
                 (field
                   (identifier))))))))))
+
+================================================================================
+ctor params: type annotation and union type annotation
+================================================================================
+
+type Point(x: Int, y: Int|Float, tag: List<Int|Float>) = { x: x }
+
+--------------------------------------------------------------------------------
+
+(source_file
+  (statement
+    (type_definition
+      name: (identifier)
+      (ctor_parameter_list
+        (ctor_parameter
+          (typed_parameter
+            name: (identifier)
+            type: (type_expression
+              (type_atom
+                name: (identifier)))))
+        (ctor_parameter
+          (typed_parameter
+            name: (identifier)
+            type: (type_expression
+              (type_atom
+                name: (identifier))
+              (type_atom
+                name: (identifier)))))
+        (ctor_parameter
+          (typed_parameter
+            name: (identifier)
+            type: (type_expression
+              (type_atom
+                name: (identifier)
+                (type_expression
+                  (type_atom
+                    name: (identifier))
+                  (type_atom
+                    name: (identifier))))))))
+      value: (expression
+        (map
+          (map_entry
+            key: (identifier)
+            value: (identifier)))))))

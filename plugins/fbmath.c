@@ -123,33 +123,33 @@ int fbuild_open(fb_State *S) {
 	fb_method(S, cls, "abs",   m_abs,
 	          &(fb_Reg){ "abs", m_abs, 1, 1, FB_RET_ANY, 0,
 	                     "absolute value; Int in -> Int out, Float in -> Float out",
-	                     NUM1, 1, NULL });
+	                     NUM1, 1, NULL, NULL, NULL });
 	fb_method(S, cls, "sign",  m_sign,
 	          &(fb_Reg){ "sign", m_sign, 1, 1, FB_RET_ANY, 0,
 	                     "-1/0/1 (or their Float equivalents), same kind as the input",
-	                     NUM1, 1, NULL });
+	                     NUM1, 1, NULL, NULL, NULL });
 	fb_method(S, cls, "min",   m_min,
 	          &(fb_Reg){ "min", m_min, 1, -1, FB_RET_ANY, 0,
-	                     "smallest of one or more Int|Float arguments", NUM1, 1, NULL });
+	                     "smallest of one or more Int|Float arguments", NUM1, 1, NULL, NULL, NULL });
 	fb_method(S, cls, "max",   m_max,
 	          &(fb_Reg){ "max", m_max, 1, -1, FB_RET_ANY, 0,
-	                     "largest of one or more Int|Float arguments", NUM1, 1, NULL });
+	                     "largest of one or more Int|Float arguments", NUM1, 1, NULL, NULL, NULL });
 	fb_method(S, cls, "pow",   m_pow,
 	          &(fb_Reg){ "pow", m_pow, 2, 2, FB_RET_ANY, 0,
 	                     "base ** exponent; Int**Int (exponent >= 0) stays Int, else Float",
-	                     NUM2, 2, NULL });
+	                     NUM2, 2, NULL, NULL, NULL });
 	fb_method(S, cls, "sqrt",  m_sqrt,
 	          &(fb_Reg){ "sqrt", m_sqrt, 1, 1, FB_RET_FLOAT, 0, "square root, always Float",
-	                     NUM1, 1, NULL });
+	                     NUM1, 1, NULL, NULL, NULL });
 	fb_method(S, cls, "floor", m_floor,
 	          &(fb_Reg){ "floor", m_floor, 1, 1, FB_RET_INT, 0, "round down, always Int",
-	                     NUM1, 1, NULL });
+	                     NUM1, 1, NULL, NULL, NULL });
 	fb_method(S, cls, "ceil",  m_ceil,
 	          &(fb_Reg){ "ceil", m_ceil, 1, 1, FB_RET_INT, 0, "round up, always Int",
-	                     NUM1, 1, NULL });
+	                     NUM1, 1, NULL, NULL, NULL });
 	fb_method(S, cls, "round", m_round,
 	          &(fb_Reg){ "round", m_round, 1, 1, FB_RET_INT, 0, "round to nearest, always Int",
-	                     NUM1, 1, NULL });
+	                     NUM1, 1, NULL, NULL, NULL });
 
 	fb_Value obj = fb_object(S, cls, NULL);
 	fb_set(S, obj, "pi", fb_float(S, M_PI));
@@ -161,7 +161,7 @@ int fbuild_open(fb_State *S) {
 	 * runs if someone calls math(...) directly. */
 	fb_register(S, &(fb_Reg){ "math", m_noncallable, 0, -1, FB_RET_ANY, FB_GLOBAL,
 	            "math namespace (fbmath): abs, sign, min, max, pow, sqrt, floor, "
-	            "ceil, round; math.pi, math.e", NULL, 0, NULL });
+	            "ceil, round; math.pi, math.e", NULL, 0, NULL, NULL, NULL });
 	fb_global_bind(S, "math", obj);
 	return 0;
 }

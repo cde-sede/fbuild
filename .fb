@@ -27,7 +27,7 @@ SRCS   = filter(glob([src/*.c]), f -> name(f) != 'main_lspd.c')
 OBJS   = SRCS |> f -> path([build], cat(stem(f), '.o'))
 HDRS   = concat(glob([src/*.h]), glob([cds-lib/cds_lib/*.h]), glob([cds-lib/*.h]), glob([cds-lib/*.c]))
 CC     = 'gcc'
-CFLAGS = '-ggdb', '-Icds-lib', '-Wall', '-Wextra', '-O2', '-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0'
+CFLAGS = '-ggdb', '-Icds-lib', '-Wall', '-Wextra', '-Werror', '-O2', '-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0'
 log    = l, m -> print(cat('[', l, '] ', m))
 
 compile = o, s -> `{CC} {...CFLAGS} -c {...s} -o {.o}`
@@ -35,12 +35,6 @@ compile = o, s -> `{CC} {...CFLAGS} -c {...s} -o {.o}`
 link    = a, d -> `{CC} {...d} -o {.a} -rdynamic -ldl -lm` when FORCE or stale(.a, ...d)
 
 create_cmd = (f, artifact, @deps -> f(.artifact, ...deps))
-
-entry = o, s -> {
-	"directory": cwd,
-	"file": .s,
-	"command": join(concat((CC), CFLAGS, ('-c', .s, '-o', .o)), ' ')
-}
 
 units = zip(OBJS, SRCS)
 objs  = units |> @u -> create_cmd(compile, ...u)
@@ -53,7 +47,18 @@ plugin_cc   = o, s -> `{CC} -shared -fPIC -Isrc {...CFLAGS} {...s} -o {.o}`
 plugins     = zip(PLUGINS, PLUGIN_SRCS) |> @u -> create_cmd(plugin_cc, ...u)
 
 mkdir([build])
-log("INFO", "Compile commands done!"), json_write([compile_commands.json], units |> u -> create_cmd(entry, ...u)) when COMMANDS
+log("INFO", "Compile commands done!"), json_write([compile_commands.json],
+	concat(
+		units |> (o, s) -> { directory: cwd,
+			file: s,
+			command: "{CC} {CFLAGS} -c {s} -o {o}"
+		},
+		zip(PLUGINS, PLUGIN_SRCS) |> (o, s) -> { directory: cwd,
+			file: s,
+			command: "{CC} -shared -fPIC -Isrc {CFLAGS} {s} -o {o}"
+		}
+	)
+) when COMMANDS
 
 (run(plugins), log("INFO", "plugins built")) when contains(TARGETS, 'plugins')
 

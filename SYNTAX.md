@@ -88,8 +88,11 @@ method Point3D.* = Point.*
    `(x: Int, y: Int) -> ...`; a bare `x: Int -> ...` is a parse error (needs
    parens). Same rule for `type NAME(params) = ...` constructor params,
    which are always parenthesized already. `Type` is a bare name (`Int Float
-   String Bool Path File Command Unit`, or any `type NAME(...)` class) or
-   one level of generic, `List<Type>` / `Tuple<Type, Type, ...>`.
+   String Bool Path File Command Unit`, or any `type NAME(...)` class), one
+   level of generic (`List<Type>` / `Tuple<Type, Type, ...>`), or a `|`-
+   separated union of any of the above, `Type|Type|...` (e.g. `Int|Float`,
+   `Int|String|Point`, `List<Int|Float>`) -- unions don't nest (a member is
+   never itself a union) and a value matches if it matches any member.
 4. **sequence** `a >> b` (ordered; build dependency)
 5. **pipe** `a |> f` (= `f(a)`; maps element-wise over a list/tuple)
 6. **guard** `e where b = v, ... when cond` (also `e when cond`)

@@ -16,8 +16,11 @@ A plain-identifier param can be annotated with one of the above, `name: Type`
 -- checked at every call site, and stronger than inference inside the body.
 Requires parens around the whole param list (`(x: Int, y: Int) -> ...`, or a
 `type NAME(...)` ctor, always parenthesized); a bare `x: Int -> ...` is a
-parse error. `Type` is a scalar name above, a `type NAME(...)` class, or one
-level of `List<Type>` / `Tuple<Type, ...>`. See SYNTAX.md.
+parse error. `Type` is a scalar name above, a `type NAME(...)` class, one
+level of `List<Type>` / `Tuple<Type, ...>`, or a `|`-separated union of any
+of those, `Type|Type|...` (e.g. `x: Int|Float`, `x: Int|String|Point`,
+`xs: List<Int|Float>`) -- a value matches the annotation if it matches any
+one member; unions don't nest. See SYNTAX.md.
 
 ## operators
 

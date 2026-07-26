@@ -615,6 +615,11 @@ void lex(char *s)
 			     sl, sc, line, col);
 			break;
 
+		case '|':
+			emit(TOK_BAR, s+i, 1,
+			     sl, sc, line, col);
+			break;
+
 		case '@':
 			emit(TOK_AT, s+i, 1,
 			     sl, sc, line, col);
@@ -732,6 +737,7 @@ const char *ast_name[] = {
 	[AST_STRTEXT]="strtext",
 	[AST_PATH]="path",
 	[AST_TYPEEXPR]="typeexpr",
+	[AST_TYPEUNION]="typeunion",
 };
 
 static ast *node(ast_kind k) {
@@ -793,6 +799,7 @@ static ast *parse_lambda(void);
 static int  lambda_ahead(int multi);
 static int  annotated_parens_ahead(void);
 static ast *parse_parameter(int allow_type);
+static ast *parse_type_atom(void);
 static ast *parse_type_expr(void);
 
 /* a lambda body extends across commas (forming a tuple) only at statement /
@@ -1594,7 +1601,7 @@ static int annotated_parens_ahead(void) {
  * one-level generic (List<Int>, Tuple<Int, String>, ...). Self-contained --
  * doesn't touch the general expression parser, so no interaction with the
  * ordinary comparison operators despite reusing '<'/'>'. */
-static ast *parse_type_expr(void) {
+static ast *parse_type_atom(void) {
 	ast *n = node(AST_TYPEEXPR);
 	n->tok = expect(.kind = TOK_ID);
 	if (accept(.kind = TOK_LT)) {
@@ -1606,6 +1613,22 @@ static ast *parse_type_expr(void) {
 		expect(.kind = TOK_GT);
 	}
 	return n;
+}
+
+/* type_expr: type_atom ("|" type_atom)*  -- e.g. Int|Float|String.
+ * Flat AST_TYPEUNION of >= 2 members; a single atom returns unwrapped. */
+static ast *parse_type_expr(void) {
+	ast *first = parse_type_atom();
+	if (!peek(.kind = TOK_BAR))
+		return first;
+	ast *u = node(AST_TYPEUNION);
+	u->tok = first->tok;
+	push(u, first);
+	while (accept(.kind = TOK_BAR)) {
+		skip_nl();
+		push(u, parse_type_atom());
+	}
+	return u;
 }
 
 /* parameter: identifier / projection / capture / destructure pattern.

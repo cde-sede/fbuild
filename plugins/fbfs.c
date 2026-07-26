@@ -169,12 +169,12 @@ int fbuild_abi(void) { return FBUILD_ABI; }
 
 int fbuild_open(fb_State *S) {
 	static const fb_Reg regs[] = {
-		{ "move", bi_move, 2, 2, FB_RET_FILE, 0, FBDOC_move },
-		{ "symlink", bi_symlink, 2, 2, FB_RET_FILE, 0, FBDOC_symlink },
-		{ "remove", bi_remove, 1, 1, FB_RET_BOOL, 0, FBDOC_remove },
-		{ "touch", bi_touch, 1, 1, FB_RET_FILE, 0, FBDOC_touch },
-		{ "is_dir", bi_is_dir, 1, 1, FB_RET_BOOL, 0, FBDOC_is_dir },
-		{ "is_file", bi_is_file, 1, 1, FB_RET_BOOL, 0, FBDOC_is_file },
+		{ "move", bi_move, 2, 2, FB_RET_FILE, 0, FBDOC_move, NULL, 0, NULL, NULL, NULL },
+		{ "symlink", bi_symlink, 2, 2, FB_RET_FILE, 0, FBDOC_symlink, NULL, 0, NULL, NULL, NULL },
+		{ "remove", bi_remove, 1, 1, FB_RET_BOOL, 0, FBDOC_remove, NULL, 0, NULL, NULL, NULL },
+		{ "touch", bi_touch, 1, 1, FB_RET_FILE, 0, FBDOC_touch, NULL, 0, NULL, NULL, NULL },
+		{ "is_dir", bi_is_dir, 1, 1, FB_RET_BOOL, 0, FBDOC_is_dir, NULL, 0, NULL, NULL, NULL },
+		{ "is_file", bi_is_file, 1, 1, FB_RET_BOOL, 0, FBDOC_is_file, NULL, 0, NULL, NULL, NULL },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);

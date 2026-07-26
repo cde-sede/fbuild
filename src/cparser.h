@@ -58,6 +58,7 @@ typedef enum {
 	TOK_TILDE,      // ~   force re-eval (ignore memoization)
 	TOK_ARROW,      // ->
 	TOK_PIPE,       // |>
+	TOK_BAR,        // |   (bare; union type separator, e.g. Int|Float)
 	TOK_MORPH,      // //
 	TOK_SPLAT,      // ...
 	TOK_SEQ,        // >>  sequential

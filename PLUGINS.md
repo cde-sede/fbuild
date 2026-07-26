@@ -211,7 +211,37 @@ matters — e.g. a bound `List<String>` — declare `ret` accordingly
 `src/run_builtins.c`).
 See `plugins/fbregex.c` for the full worked example.
 
+## Union return/param types
+
+`ret`/`param_types` (a plain `fb_Ret`/`fb_Ret[]`) can only say "this slot is
+exactly one kind". For a real `Int|Float|...` union -- more members than
+`FB_RET_NUM`'s built-in Int-or-Float shorthand covers, or a union that isn't
+numeric at all -- use `fb_Reg.ret_union` (return type) and/or
+`param_type_unions` (parallel to `param_types`, per-argument): each is a
+pointer to a `const fb_RetUnion { const fb_Ret *members; int nmembers; }`,
+and when set takes priority over the plain `ret`/`param_types[i]` for that
+slot. `param_type_unions[i]` may be `NULL` even when the array itself is
+non-`NULL` -- that slot falls back to `param_types[i]` as usual.
+
+```c
+static const fb_Ret INT_OR_STR[] = { FB_RET_INT, FB_RET_STR };
+static const fb_RetUnion RU_INT_OR_STR = { INT_OR_STR, 2 };
+
+fb_register(S, &(fb_Reg){ "tag", l_tag, 1, 1, FB_RET_ANY, 0,
+                          "accepts Int or String", NULL, 0, NULL,
+                          &RU_INT_OR_STR });
+```
+
+The checker/hover render it exactly like a language-level annotation
+(`Int|String`), and a call is checked against it the same way (see
+SKILLS.md's `types` section).
+
 ## ABI stability
 
 `FBUILD_ABI` (in `fbuild.h`) is bumped on any incompatible change to the ABI.
-Rebuild plugins against the matching `fbuild.h` when it changes.
+Rebuild plugins against the matching `fbuild.h` when it changes. Bumped to 5
+for `fb_Reg`'s new trailing `ret_union`/`param_type_unions` fields (see
+"Union return/param types" above) -- a positional (non-designated) `fb_Reg{
+... }` initializer written against ABI 4 or earlier still compiles (the two
+new fields default to `NULL`/no-union), just recompile against the current
+`fbuild.h` to pick up the new struct layout.

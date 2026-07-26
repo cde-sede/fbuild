@@ -61,6 +61,8 @@ typedef enum {
 	AST_PATH,       /* tok                                         */
 	AST_TYPEEXPR,   /* tok = base type name; kids = generic args,  */
 	                /* e.g. List<Int> -> tok "List", kids[0]="Int" */
+	AST_TYPEUNION,  /* tok = NULL (position = first member's tok); */
+	                /* kids = member AST_TYPEEXPR, e.g. Int|Float  */
 } ast_kind;
 
 
@@ -71,9 +73,12 @@ typedef enum {
 	RET_FLOAT,
 	RET_STRING,
 	RET_BOOL,
-	RET_NUMERIC,    /* Int or Float, unresolved which -- same informal notion  */
-	                /* arithmetic operand errors already use in prose; unifies */
-	                /* with RET_INT/RET_FLOAT/itself, nothing else            */
+	RET_UNION,      /* union of children[0..nchildren): A|B|C. Unifies with a  */
+	                /* concrete type iff any member does, and with another     */
+	                /* union iff any pair of members does. The built-in        */
+	                /* "Int or Float, unresolved which" numeric result (see    */
+	                /* walk.c's t_numeric()) is just the {Int,Float} case --   */
+	                /* no separate RET_NUMERIC anymore.                        */
 
 	RET_FILE,       /* a path/file: a record of name/stem/.../mtime/size  */
 	RET_COMMAND,    /* a build action produced by a `...` command literal */

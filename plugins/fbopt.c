@@ -562,21 +562,21 @@ int fbuild_abi(void) { return FBUILD_ABI; }
 
 int fbuild_open(fb_State *S) {
 	static const fb_Reg regs[] = {
-		{ "stalem", bi_stalem, 1, -1, FB_RET_BOOL, 0, FBDOC_stalem },
-		{ "mtimem", bi_mtimem, 1, 1, FB_RET_INT, 0, FBDOC_mtimem },
-		{ "newest", bi_newest, 1, -1, FB_RET_FILE, 0, FBDOC_newest },
-		{ "oldest", bi_oldest, 1, -1, FB_RET_FILE, 0, FBDOC_oldest },
-		{ "existsm", bi_existsm, 1, 1, FB_RET_BOOL, 0, FBDOC_existsm },
-		{ "is_filem", bi_is_filem, 1, 1, FB_RET_BOOL, 0, FBDOC_is_filem },
-		{ "is_dirm", bi_is_dirm, 1, 1, FB_RET_BOOL, 0, FBDOC_is_dirm },
-		{ "globm", bi_globm, 1, 1, FB_RET_LIST, 0, FBDOC_globm },
-		{ "needed", bi_needed, 1, -1, FB_RET_LIST, 0, FBDOC_needed },
-		{ "depsm", bi_depsm, 1, 1, FB_RET_LIST, 0, FBDOC_depsm },
-		{ "hashm", bi_hashm, 1, 1, FB_RET_INT, 0, FBDOC_hashm },
-		{ "stale_hash", bi_stale_hash, 1, -1, FB_RET_BOOL, 0, FBDOC_stale_hash },
-		{ "cache_load", bi_cache_load, 1, 1, FB_RET_BOOL, 0, FBDOC_cache_load },
-		{ "cache_save", bi_cache_save, 1, 1, FB_RET_BOOL, 0, FBDOC_cache_save },
-		{ "stat_reset", bi_stat_reset, 0, 0, FB_RET_BOOL, 0, FBDOC_stat_reset },
+		{ "stalem", bi_stalem, 1, -1, FB_RET_BOOL, 0, FBDOC_stalem, NULL, 0, NULL, NULL, NULL },
+		{ "mtimem", bi_mtimem, 1, 1, FB_RET_INT, 0, FBDOC_mtimem, NULL, 0, NULL, NULL, NULL },
+		{ "newest", bi_newest, 1, -1, FB_RET_FILE, 0, FBDOC_newest, NULL, 0, NULL, NULL, NULL },
+		{ "oldest", bi_oldest, 1, -1, FB_RET_FILE, 0, FBDOC_oldest, NULL, 0, NULL, NULL, NULL },
+		{ "existsm", bi_existsm, 1, 1, FB_RET_BOOL, 0, FBDOC_existsm, NULL, 0, NULL, NULL, NULL },
+		{ "is_filem", bi_is_filem, 1, 1, FB_RET_BOOL, 0, FBDOC_is_filem, NULL, 0, NULL, NULL, NULL },
+		{ "is_dirm", bi_is_dirm, 1, 1, FB_RET_BOOL, 0, FBDOC_is_dirm, NULL, 0, NULL, NULL, NULL },
+		{ "globm", bi_globm, 1, 1, FB_RET_LIST, 0, FBDOC_globm, NULL, 0, NULL, NULL, NULL },
+		{ "needed", bi_needed, 1, -1, FB_RET_LIST, 0, FBDOC_needed, NULL, 0, NULL, NULL, NULL },
+		{ "depsm", bi_depsm, 1, 1, FB_RET_LIST, 0, FBDOC_depsm, NULL, 0, NULL, NULL, NULL },
+		{ "hashm", bi_hashm, 1, 1, FB_RET_INT, 0, FBDOC_hashm, NULL, 0, NULL, NULL, NULL },
+		{ "stale_hash", bi_stale_hash, 1, -1, FB_RET_BOOL, 0, FBDOC_stale_hash, NULL, 0, NULL, NULL, NULL },
+		{ "cache_load", bi_cache_load, 1, 1, FB_RET_BOOL, 0, FBDOC_cache_load, NULL, 0, NULL, NULL, NULL },
+		{ "cache_save", bi_cache_save, 1, 1, FB_RET_BOOL, 0, FBDOC_cache_save, NULL, 0, NULL, NULL, NULL },
+		{ "stat_reset", bi_stat_reset, 0, 0, FB_RET_BOOL, 0, FBDOC_stat_reset, NULL, 0, NULL, NULL, NULL },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);

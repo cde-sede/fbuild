@@ -138,24 +138,25 @@ int fbuild_open(fb_State *S) {
 	static const fb_Ret list1[] = { FB_RET_LIST };
 	fb_method(S, STREAM_CLS, "write",      m_write,
 	          &(fb_Reg){ "write", m_write, 1, 1, FB_RET_ANY, 0,
-	                     "raw write, no newline; chainable", str1, 1, "Stream" });
+	                     "raw write, no newline; chainable", str1, 1, "Stream", NULL, NULL });
 	fb_method(S, STREAM_CLS, "writeln",    m_writeln,
 	          &(fb_Reg){ "writeln", m_writeln, 1, 1, FB_RET_ANY, 0,
-	                     "s + \"\\n\"; chainable", str1, 1, "Stream" });
+	                     "s + \"\\n\"; chainable", str1, 1, "Stream", NULL, NULL });
 	fb_method(S, STREAM_CLS, "writelines", m_writelines,
 	          &(fb_Reg){ "writelines", m_writelines, 1, 1, FB_RET_ANY, 0,
 	                     "each element stringified + \"\\n\" (bare value ok too); chainable",
-	                     list1, 1, "Stream" });
+	                     list1, 1, "Stream", NULL, NULL });
 	fb_method(S, STREAM_CLS, "flush",      m_flush,
 	          &(fb_Reg){ "flush", m_flush, 0, 0, FB_RET_BOOL, 0, "flush buffered writes",
-	                     NULL, 0, NULL });
+	                     NULL, 0, NULL, NULL, NULL });
 	fb_method(S, STREAM_CLS, "close",      m_close,
 	          &(fb_Reg){ "close", m_close, 0, 0, FB_RET_BOOL, 0,
-	                     "flush + close; safe to call more than once", NULL, 0, NULL });
+	                     "flush + close; safe to call more than once", NULL, 0, NULL, NULL, NULL });
+	fb_class_field(S, STREAM_CLS, "path", FB_RET_STR, NULL);
 
 	static const fb_Ret stream_params[] = { FB_RET_STR, FB_RET_STR };
 	static const fb_Reg regs[] = {
-		{ "stream", bi_stream, 1, 2, FB_RET_ANY, 0, FBDOC_stream, stream_params, 2, "Stream" },
+		{ "stream", bi_stream, 1, 2, FB_RET_ANY, 0, FBDOC_stream, stream_params, 2, "Stream", NULL, NULL },
 	};
 	for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
 		fb_register(S, &regs[i]);

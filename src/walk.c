@@ -60,6 +60,7 @@ char *AST_NODE_NAMES[] = {
 	[AST_STRTEXT] = "AST_STRTEXT",
 	[AST_PATH] = "AST_PATH",
 	[AST_TYPEEXPR] = "AST_TYPEEXPR",
+	[AST_TYPEUNION] = "AST_TYPEUNION",
 
 };
 
@@ -94,6 +95,20 @@ static obj_type *t_functor(obj_type *param, obj_type *ret) {
 	k[0] = param;
 	k[1] = ret;
 	return t_compound(RET_FUNCTOR, 2, k);
+}
+
+/* the canonical "Int or Float, unresolved which" union -- what a bare
+ * arithmetic result / FB_RET_NUM used to spell as the standalone RET_NUMERIC
+ * scalar, now just the two-member case of the general RET_UNION. */
+static obj_type *t_numeric(void) {
+	obj_type **k = a_alloc(2 * sizeof *k);
+	k[0] = t_new(RET_INT);
+	k[1] = t_new(RET_FLOAT);
+	return t_compound(RET_UNION, 2, k);
+}
+
+static obj_type *t_union(size_t n, obj_type **kids) {
+	return t_compound(RET_UNION, n, kids);
 }
 
 /* append a named field to a record type (RET_FILE) */
@@ -176,7 +191,6 @@ static obj_type *infer_parser_schema(ast *schema) {
 	rec_push(rec, &PS_rest, t_list(t_new(RET_STRING)));
 	return rec;
 }
-
 /* map a registered builtin's declared return type (fbuild.h) to a checker type.
  * Map/Json and ANY are RET_VAR (unknown): field access stays permissive. */
 static obj_type *fb_ret_type(fb_Ret r) {
@@ -189,11 +203,20 @@ static obj_type *fb_ret_type(fb_Ret r) {
 	case FB_RET_LIST: return t_list(t_new(RET_VAR));
 	case FB_RET_LIST_STR: return t_list(t_new(RET_STRING));
 	case FB_RET_UNIT: return t_new(RET_NONE);
-	case FB_RET_NUM:  return t_new(RET_NUMERIC);
+	case FB_RET_NUM:  return t_numeric();
 	case FB_RET_MAP:
 	case FB_RET_ANY:
 	default:          return t_new(RET_VAR);
 	}
+}
+
+/* an fb_RetUnion (see fbuild.h) -> the same RET_UNION a language-level
+ * A|B|C annotation resolves to; each member goes through fb_ret_type(). */
+static obj_type *fb_ret_union_type(const fb_RetUnion *u) {
+	obj_type **k = u->nmembers ? a_alloc(u->nmembers * sizeof *k) : NULL;
+	for (int i = 0; i < u->nmembers; i++)
+		k[i] = fb_ret_type(u->members[i]);
+	return t_union((size_t)u->nmembers, k);
 }
 
 /* a `token` naming a native class (e.g. "Stream"), for obj_type.class_name
@@ -211,15 +234,24 @@ static token *native_class_token(const char *name) {
 	return t;
 }
 
-/* a registered function/method's return type -- `ret_class` (an instance of
- * a native class, e.g. stream()'s "Stream") takes priority over `ret` when
- * set, same as fbuild.h documents. */
+/* an instance-of-native-class type, e.g. "Pipeline" for a Pipeline param/
+ * return slot -- shared by fb_reg_ret_type (ret_class) and builtin_signature
+ * (param_classes[i]). */
+static obj_type *t_native_class(const char *name) {
+	obj_type *t = t_new(RET_OBJECT);
+	t->class_name = native_class_token(name);
+	return t;
+}
+
+/* a registered function/method's return type -- `ret_union` (an arbitrary
+ * A|B|C union) takes priority over both `ret_class` and `ret`; `ret_class`
+ * (an instance of a native class, e.g. stream()'s "Stream") takes priority
+ * over plain `ret` when set, same as fbuild.h documents. */
 static obj_type *fb_reg_ret_type(const fb_Reg *rg) {
-	if (rg->ret_class) {
-		obj_type *t = t_new(RET_OBJECT);
-		t->class_name = native_class_token(rg->ret_class);
-		return t;
-	}
+	if (rg->ret_union)
+		return fb_ret_union_type(rg->ret_union);
+	if (rg->ret_class)
+		return t_native_class(rg->ret_class);
 	return fb_ret_type(rg->ret);
 }
 
@@ -263,24 +295,63 @@ static void type_err(token *where, const char *fmt, ...) {
 
 static obj_type *record_field(obj_type *rec, token *name);
 
-static int is_numericish(ret_type r) {
-	return r == RET_INT || r == RET_FLOAT || r == RET_NUMERIC;
+/* true for a concrete Int/Float, or a union whose every member is
+ * (recursively) numericish, e.g. the {Int,Float} union t_numeric() builds.
+ * A union with a non-numeric member (Int|String) is NOT numericish -- it
+ * can't stand in for an arithmetic operand regardless of which alternative
+ * a given value happens to be. */
+static int is_numericish(obj_type *t) {
+	if (!t)
+		return 0;
+	if (t->ret == RET_INT || t->ret == RET_FLOAT)
+		return 1;
+	if (t->ret == RET_UNION) {
+		if (t->nchildren == 0)
+			return 0;
+		for (size_t i = 0; i < t->nchildren; i++)
+			if (!is_numericish(t->children[i]))
+				return 0;
+		return 1;
+	}
+	return 0;
 }
 
 /* structural compatibility; RET_VAR (unknown) unifies with anything.
- * RET_OBJECT does too, UNLESS both sides have a known field shape (populated
- * by infer_objnew_schema/infer_parser_schema/rec_define) -- an unshaped
- * object (spread of something dynamic, or a non-map fields body) still
- * unifies with anything to avoid false positives, same as before this field
- * tracking existed (see ast.h). Fields are compared by name, not position:
- * map/spread field order isn't semantically meaningful, unlike a Tuple's. */
+ * RET_UNION unifies with a concrete type iff any member does, and with
+ * another union iff any pair of members does (the recursive call on a
+ * RET_UNION `o` re-enters this same branch from the other side, so both
+ * directions get checked without a separate union-vs-union case).
+ * RET_OBJECT: two objects with DIFFERENT known class_name never unify,
+ * regardless of field-shape tracking -- a Buffer is never a Shader even if
+ * neither has a tracked shape (native ret_class/param-class types never do,
+ * see ast.h). Same class_name (or either side missing one, which shouldn't
+ * happen for a real RET_OBJECT but is tolerated) falls through to the field
+ * check, UNLESS both sides have a known field shape (populated by
+ * infer_objnew_schema/infer_parser_schema/rec_define) -- an unshaped object
+ * (spread of something dynamic, or a non-map fields body) still unifies
+ * with anything of the same class to avoid false positives, same as before
+ * this field tracking existed (see ast.h). Fields are compared by name, not
+ * position: map/spread field order isn't semantically meaningful, unlike a
+ * Tuple's. */
 static int unify(obj_type *a, obj_type *b) {
 	if (!a || !b)
 		return 1;
 	if (a->ret == RET_VAR || b->ret == RET_VAR)
 		return 1;
+	if (a->ret == RET_UNION || b->ret == RET_UNION) {
+		obj_type *u = a->ret == RET_UNION ? a : b;
+		obj_type *o = a->ret == RET_UNION ? b : a;
+		for (size_t i = 0; i < u->nchildren; i++)
+			if (unify(u->children[i], o))
+				return 1;
+		return 0;
+	}
 	if (a->ret == RET_OBJECT || b->ret == RET_OBJECT) {
-		if (a->ret != b->ret || !a->fields || !b->fields)
+		if (a->ret != b->ret)
+			return 1;
+		if (a->class_name && b->class_name && !tok_eq(a->class_name, b->class_name))
+			return 0;
+		if (!a->fields || !b->fields)
 			return 1;
 		for (size_t i = 0; i < a->nchildren; i++) {
 			obj_type *bf = record_field(b, a->fields[i]);
@@ -289,8 +360,13 @@ static int unify(obj_type *a, obj_type *b) {
 		}
 		return 1;
 	}
-	if (is_numericish(a->ret) && is_numericish(b->ret))
-		return 1;                    /* Int/Float/Numeric are mutually numeric */
+	/* Int and Float mutually unify even as two concrete (non-union) types --
+	 * long-standing leniency predating RET_UNION (was "is_numericish(a) &&
+	 * is_numericish(b)", back when RET_NUMERIC was numericish too; the union
+	 * branch above already covers anything union-shaped, so this only still
+	 * needs to handle the plain-Int-vs-plain-Float pair). */
+	if ((a->ret == RET_INT || a->ret == RET_FLOAT) && (b->ret == RET_INT || b->ret == RET_FLOAT))
+		return 1;
 	if (a->ret != b->ret)
 		return 0;
 	if (a->nchildren != b->nchildren)
@@ -370,7 +446,7 @@ static obj_type *record_field(obj_type *rec, token *name) {
 static int unify(obj_type *a, obj_type *b);
 static obj_type *record_field(obj_type *rec, token *name);
 static void type_err(token *where, const char *fmt, ...);
-static const char *ret_kind_name(ret_type r);
+static const char *ret_kind_name(obj_type *t);
 
 static void rec_define(obj_type *rec, token *name, obj_type *ft, token *where) {
 	obj_type *cur = record_field(rec, name);
@@ -378,27 +454,48 @@ static void rec_define(obj_type *rec, token *name, obj_type *ft, token *where) {
 		if (!unify(cur, ft))
 			type_err(where, "field '%.*s' is %s, cannot set to %s",
 			         (int)name->len, name->string,
-			         ret_kind_name(cur->ret), ret_kind_name(ft->ret));
+			         ret_kind_name(cur), ret_kind_name(ft));
 	} else {
 		rec_push(rec, name, ft);
 	}
 }
 
-static const char *ret_kind_name(ret_type r) {
-	switch (r) {
+/* short kind name for error messages; a union joins its members' own short
+ * names with "|" (e.g. "Int|Float", "Int|String|Point"), arena-allocated via
+ * a_dup since it's built at call time instead of being a string literal. */
+static const char *ret_kind_name(obj_type *t) {
+	if (!t)
+		return "?";
+	switch (t->ret) {
 	case RET_NONE:    return "None";
 	case RET_INT:     return "Int";
 	case RET_FLOAT:   return "Float";
 	case RET_STRING:  return "String";
 	case RET_BOOL:    return "Bool";
-	case RET_NUMERIC: return "Int|Float";
 	case RET_FILE:    return "File";
 	case RET_COMMAND: return "Command";
 	case RET_LIST:    return "List";
 	case RET_TUPLE:   return "Tuple";
 	case RET_FUNCTOR: return "Functor";
-	case RET_OBJECT:  return "Object";   /* no class_name here -- see obj_type_print for the named form */
+	case RET_OBJECT:
+		return t->class_name ? a_dupn(t->class_name->string, t->class_name->len) : "Object";
 	case RET_VAR:     return "?";
+	case RET_UNION: {
+		char buf[256];
+		size_t pos = 0;
+		for (size_t i = 0; i < t->nchildren; i++) {
+			const char *m = ret_kind_name(t->children[i]);
+			size_t mlen = strlen(m);
+			if (i && pos < sizeof buf - 1)
+				buf[pos++] = '|';
+			if (pos + mlen >= sizeof buf)
+				mlen = sizeof buf - 1 - pos;
+			memcpy(buf + pos, m, mlen);
+			pos += mlen;
+		}
+		buf[pos] = 0;
+		return a_dup(buf);
+	}
 	}
 	return "?";
 }
@@ -504,8 +601,8 @@ static obj_type *infer_id(token *name) {
 	}
 	{
 		const fb_Reg *rg = fb_reg_findn(name->string, name->len);
-		if (rg && (rg->flags & FB_GLOBAL))   /* bound global value: type from `ret` */
-			return fb_ret_type(rg->ret);
+		if (rg && (rg->flags & FB_GLOBAL))   /* bound global value: type from `ret`/`ret_union` */
+			return rg->ret_union ? fb_ret_union_type(rg->ret_union) : fb_ret_type(rg->ret);
 	}
 	if (is_builtin_name(name))
 		return t_new(RET_VAR);
@@ -676,11 +773,19 @@ static obj_type *builtin_signature(token *name, obj_type *result_type) {
 	}
 	if (mn < 0) return NULL;
 
-	/* slot `i`: rg's own declared param_types that far in, else the
-	 * generic "?" every slot used to be unconditionally. g_core_arity-only
-	 * names (rg stays NULL) always fall to "?" -- core builtins aren't
-	 * fb_Reg-registered, so there's nothing to type them from here. */
-#define PSLOT(i) ((rg && rg->param_types && (int)(i) < rg->nparams) \
+	/* slot `i`: rg's own declared param_type_unions[i] if set (a real A|B|C
+	 * union), else an fb_reg_param_class()-declared native class for this
+	 * slot (e.g. a Pipeline/Buffer param -- kept OUTSIDE fb_Reg, see
+	 * fbuild.h), else param_types[i], else the generic "?" every slot used
+	 * to be unconditionally. g_core_arity-only names (rg stays NULL) always
+	 * fall to "?" -- core builtins aren't fb_Reg-registered, so there's
+	 * nothing to type them from here. */
+#define PSLOT(i) ((rg && rg->param_type_unions && (int)(i) < rg->nparams \
+                   && rg->param_type_unions[i]) \
+                  ? fb_ret_union_type(rg->param_type_unions[i]) \
+                  : (rg && fb_reg_param_class_at(rg->name, (int)(i))) \
+                  ? t_native_class(fb_reg_param_class_at(rg->name, (int)(i))) \
+                  : (rg && rg->param_types && (int)(i) < rg->nparams) \
                   ? fb_ret_type(rg->param_types[i]) : t_new(RET_VAR))
 
 	obj_type *param;
@@ -867,7 +972,7 @@ static obj_type *infer_call_impl(ast *node, scope *sc) {
 				obj_type *ai = infer(node->kids[i + 1], sc);
 				if (!is_seq_t(ai))
 					type_err(callee->tok, "zip argument %zu must be a List or Tuple, got %s",
-					         i + 1, ret_kind_name(ai->ret));
+					         i + 1, ret_kind_name(ai));
 				elems[i] = elem_of(ai);
 			}
 			return t_list(t_compound(RET_TUPLE, na, elems));
@@ -985,17 +1090,17 @@ static obj_type *infer_call_impl(ast *node, scope *sc) {
 		if (na == 1) {
 			if (!unify(ft->children[0], a0))
 				type_err(where, "argument is %s, function expects %s",
-				         ret_kind_name(a0 ? a0->ret : RET_VAR),
-				         ret_kind_name(ft->children[0]->ret));
+				         ret_kind_name(a0),
+				         ret_kind_name(ft->children[0]));
 		} else if (na >= 2 && ft->children[0] && ft->children[0]->ret == RET_TUPLE) {
 			obj_type *p0 = positional(ft->children[0], 0);
 			obj_type *p1 = positional(ft->children[0], 1);
 			if (!unify(p0, a0))
 				type_err(where, "argument 1 is %s, function expects %s",
-				         ret_kind_name(a0 ? a0->ret : RET_VAR), ret_kind_name(p0->ret));
+				         ret_kind_name(a0), ret_kind_name(p0));
 			if (!unify(p1, a1))
 				type_err(where, "argument 2 is %s, function expects %s",
-				         ret_kind_name(a1 ? a1->ret : RET_VAR), ret_kind_name(p1->ret));
+				         ret_kind_name(a1), ret_kind_name(p1));
 		}
 		return ft->nchildren > 1 ? ft->children[1] : t_new(RET_VAR);
 	}
@@ -1168,7 +1273,7 @@ static void bind_params_lam(scope *sc, ast *params, obj_type *arg, ast **arg_lam
 					if (!unify(decl_t, pt))
 						type_err(p->tok, "parameter '%.*s' declared %s, got %s",
 						         (int)p->tok->len, p->tok->string,
-						         ret_kind_name(decl_t->ret), ret_kind_name(pt->ret));
+						         ret_kind_name(decl_t), ret_kind_name(pt));
 					pt = decl_t;
 				}
 				scope_put_lam(sc, p->tok, pt, lam);
@@ -1232,7 +1337,7 @@ static obj_type *infer_apply_lam(ast *fn, obj_type *arg, ast **arg_lams, scope *
 		fn->type = t_functor(t_file(), t_file());
 		if (arg && arg->ret != RET_FILE && arg->ret != RET_VAR)
 			type_err(fn->tok, "morphism expects a File, got %s",
-			         ret_kind_name(arg->ret));
+			         ret_kind_name(arg));
 		return t_file();
 	}
 
@@ -1240,8 +1345,8 @@ static obj_type *infer_apply_lam(ast *fn, obj_type *arg, ast **arg_lams, scope *
 	if (ft && ft->ret == RET_FUNCTOR && ft->nchildren > 1) {
 		if (!unify(ft->children[0], arg))
 			type_err(NULL, "function expects %s, got %s",
-			         ret_kind_name(ft->children[0]->ret),
-			         ret_kind_name(arg ? arg->ret : RET_VAR));
+			         ret_kind_name(ft->children[0]),
+			         ret_kind_name(arg));
 		return ft->children[1];
 	}
 	return t_new(RET_VAR);
@@ -1438,16 +1543,24 @@ static obj_type *method_self_type(token *class_name) {
 	return ctor->kids[1]->type;
 }
 
-/* Resolve a parsed `: Type` param annotation (AST_TYPEEXPR, see
- * build_system.c's parse_type_expr) to a checker type. Scalars map
+/* Resolve a parsed `: Type` param annotation (AST_TYPEEXPR/AST_TYPEUNION,
+ * see build_system.c's parse_type_expr) to a checker type. Scalars map
  * directly; List<T>/Tuple<T,...> recurse one level (matches the parser,
  * which only accepts these two generics); any other name is looked up as a
  * `type NAME(...)` class -- same lookup as method_self_type, returning
  * RET_VAR (not an error) if the class exists but hasn't been inferred yet
  * (forward reference, tolerated same as everywhere else in this checker).
  * A name that's neither a scalar keyword nor any known top-level def is a
- * real type_err, falling back to RET_VAR so the rest of inference proceeds. */
+ * real type_err, falling back to RET_VAR so the rest of inference proceeds.
+ * A|B|C (AST_TYPEUNION) resolves each member and builds a RET_UNION --
+ * members are never themselves unions (the parser already flattens). */
 static obj_type *resolve_type_expr_uncached(ast *te) {
+	if (te->kind == AST_TYPEUNION) {
+		obj_type **k = te->nkids ? a_alloc(te->nkids * sizeof *k) : NULL;
+		for (size_t i = 0; i < te->nkids; i++)
+			k[i] = resolve_type_expr(te->kids[i]);
+		return t_union(te->nkids, k);
+	}
 	token *name = te->tok;
 	if (te->nkids == 0) {
 		if (tok_is(name, "Int"))     return t_new(RET_INT);
@@ -1651,7 +1764,7 @@ static obj_type *infer(ast *node, scope *sc) {
 		obj_type *r = infer(node->kids[1], sc);
 		if (!unify(l, r))
 			type_err(node->tok, "cannot compare %s with %s",
-			         ret_kind_name(l->ret), ret_kind_name(r->ret));
+			         ret_kind_name(l), ret_kind_name(r));
 		t = t_new(RET_BOOL);
 		break;
 	}
@@ -1659,28 +1772,28 @@ static obj_type *infer(ast *node, scope *sc) {
 	case AST_ARITH: {     /* + - * / % : (Int|Float) x (Int|Float) -> Int|Float */
 		obj_type *l = infer(node->kids[0], sc);
 		obj_type *r = infer(node->kids[1], sc);
-		if (!is_numericish(l->ret) && l->ret != RET_VAR)
+		if (!is_numericish(l) && l->ret != RET_VAR)
 			type_err(node->tok, "arithmetic operand must be Int or Float, got %s",
-			         ret_kind_name(l->ret));
-		if (!is_numericish(r->ret) && r->ret != RET_VAR)
+			         ret_kind_name(l));
+		if (!is_numericish(r) && r->ret != RET_VAR)
 			type_err(node->tok, "arithmetic operand must be Int or Float, got %s",
-			         ret_kind_name(r->ret));
-		/* RET_NUMERIC ("Int or Float", unresolved which) on either side keeps
-		 * the result RET_NUMERIC too -- collapsing it to RET_INT here would
-		 * be a silent, wrong guess (it might be Float at runtime). */
-		ret_type rt = (l->ret == RET_FLOAT || r->ret == RET_FLOAT) ? RET_FLOAT
-		            : (l->ret == RET_NUMERIC || r->ret == RET_NUMERIC) ? RET_NUMERIC
-		            : RET_INT;
-		t = t_new(rt);
+			         ret_kind_name(r));
+		/* an unresolved {Int,Float} union on either side (see t_numeric())
+		 * keeps the result that same union -- collapsing it to RET_INT here
+		 * would be a silent, wrong guess (it might be Float at runtime). */
+		obj_type *rt = (l->ret == RET_FLOAT || r->ret == RET_FLOAT) ? t_new(RET_FLOAT)
+		             : (l->ret == RET_UNION || r->ret == RET_UNION) ? t_numeric()
+		             : t_new(RET_INT);
+		t = rt;
 		break;
 	}
 
 	case AST_NEG: {                      /* unary "-" : Int|Float -> Int|Float */
 		obj_type *o = infer(node->kids[0], sc);
-		if (!is_numericish(o->ret) && o->ret != RET_VAR)
+		if (!is_numericish(o) && o->ret != RET_VAR)
 			type_err(node->tok, "'-' operand must be numeric, got %s",
-			         ret_kind_name(o->ret));
-		t = t_new(o->ret == RET_FLOAT ? RET_FLOAT : o->ret == RET_NUMERIC ? RET_NUMERIC : RET_INT);
+			         ret_kind_name(o));
+		t = o->ret == RET_FLOAT ? t_new(RET_FLOAT) : o->ret == RET_UNION ? t_numeric() : t_new(RET_INT);
 		break;
 	}
 
@@ -1792,11 +1905,16 @@ static obj_type *infer(ast *node, scope *sc) {
 			                  || class_has_native_method(base->class_name, node->tok));
 			/* a native class (Stream: fb_reg_has_class matches, at least one
 			 * "Stream.<method>" shadow entry exists) has a FULLY known,
-			 * closed method set -- no data fields, so nothing else can ever
-			 * legitimately miss `record_field`. Unlike a language object
-			 * with no fields tracked (a dynamic/spread shape might still
-			 * have members this build can't see), a miss there IS a real
-			 * error, same strictness as RET_FILE. */
+			 * closed method set. It can still carry plain fb_set() data
+			 * fields (e.g. stream()'s "path") though -- a plugin declares
+			 * those explicitly via fb_class_field() so the checker can tell
+			 * a legitimate field from a real typo (is_native_field below);
+			 * anything neither a known method nor a declared field IS a
+			 * real error, same strictness as RET_FILE. */
+			fb_Ret nf_ret = FB_RET_ANY; const char *nf_ret_class = NULL;
+			int is_native_field = !ft && base && base->ret == RET_OBJECT && base->class_name
+			                     && fb_native_field_type(tok_str(base->class_name), tok_str(node->tok),
+			                                             &nf_ret, &nf_ret_class);
 			int native_closed = base && base->ret == RET_OBJECT && base->class_name
 			                   && fb_reg_has_class(tok_str(base->class_name));
 			/* stay permissive for an object with an unknown field shape
@@ -1804,13 +1922,17 @@ static obj_type *infer(ast *node, scope *sc) {
 			 * a method (separate namespace, not statically checked -- see
 			 * class_has_method/class_has_native_method: a language
 			 * `type`/`method` class, or a native one, via fb_method()'s
-			 * shadow registry entries). */
+			 * shadow registry entries), or a declared native field. */
 			int permissive_obj = base && base->ret == RET_OBJECT
-			                    && ((!base->fields && !native_closed) || is_method);
+			                    && ((!base->fields && !native_closed) || is_method || is_native_field);
 			if (!ft && base && base->ret != RET_VAR && !permissive_obj)
 				type_err(node->tok, "%s has no field '%.*s'",
-				         ret_kind_name(base->ret),
+				         ret_kind_name(base),
 				         (int)node->tok->len, node->tok->string);
+			if (!ft && is_native_field) {
+				fb_Reg synth = { .ret = nf_ret, .ret_class = nf_ret_class };
+				ft = fb_reg_ret_type(&synth);
+			}
 			if (!ft && is_method) {
 				ft = class_method_type(base->class_name, node->tok);
 				if (!ft) ft = dotted_reg_type(base->class_name, node->tok);
@@ -1867,7 +1989,7 @@ static obj_type *infer(ast *node, scope *sc) {
 			} else if (fv->ret != RET_VAR) {
 				type_err(node->tok,
 				         "cannot splat %s into File (expected File)",
-				         ret_kind_name(fv->ret));
+				         ret_kind_name(fv));
 			}
 		}
 		t = rec;
@@ -1941,7 +2063,6 @@ void obj_type_print(obj_type *t) {
 	case RET_FLOAT:  printf("Float");  break;
 	case RET_STRING:  printf("String");  break;
 	case RET_BOOL:    printf("Bool");    break;
-	case RET_NUMERIC: printf("Int|Float"); break;
 	case RET_FILE:    printf("File");    break;   /* fields are standard */
 	case RET_COMMAND: printf("Command"); break;
 	case RET_VAR:     printf("%s", t->var_label ? t->var_label : "?"); break;
@@ -2002,6 +2123,13 @@ void obj_type_print(obj_type *t) {
 		printf(")");
 		break;
 	}
+
+	case RET_UNION:
+		for (size_t i = 0; i < t->nchildren; i++) {
+			if (i) printf("|");
+			obj_type_print(t->children[i]);
+		}
+		break;
 	}
 }
 
@@ -2338,7 +2466,6 @@ static void obj_type_sprint_into(obj_type *t, char *buf, size_t bufsz, size_t *p
 	case RET_FLOAT:   APPEND("Float");   break;
 	case RET_STRING:  APPEND("String");  break;
 	case RET_BOOL:    APPEND("Bool");    break;
-	case RET_NUMERIC: APPEND("Int|Float"); break;
 	case RET_FILE:    APPEND("File");    break;
 	case RET_COMMAND: APPEND("Command"); break;
 	case RET_VAR:     APPEND("%s", t->var_label ? t->var_label : "?"); break;
@@ -2391,6 +2518,12 @@ static void obj_type_sprint_into(obj_type *t, char *buf, size_t bufsz, size_t *p
 		APPEND(")");
 		break;
 	}
+	case RET_UNION:
+		for (size_t i = 0; i < t->nchildren; i++) {
+			if (i) APPEND("|");
+			obj_type_sprint_into(t->children[i], buf, bufsz, pos);
+		}
+		break;
 	}
 #undef APPEND
 }

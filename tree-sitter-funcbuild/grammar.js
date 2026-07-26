@@ -66,7 +66,7 @@ export default grammar({
       "type",
       field("name", $.identifier),
       "(",
-      optional($.parameter_list),
+      optional($.ctor_parameter_list),
       ")",
       "=",
       field("value", $.expression),
@@ -286,6 +286,50 @@ export default grammar({
       $.identifier,
       $.projection,
       $.capture,
+    ),
+
+    // `type NAME(...)` ctor params only -- the hand-written C parser accepts
+    // a `: Type` annotation here (and on the dedicated parenthesized-lambda
+    // form `(x: Int, y: Int) -> ...`, not represented in this grammar yet)
+    // because the parens make it unambiguous; a bare, unparenthesized
+    // `parameter` can't carry one (`{x: Int -> ...}`'s leading `identifier
+    // ":"` would collide with a map literal's own `key: value` shorthand --
+    // confirmed by tree-sitter itself refusing to generate a parser for
+    // that shared-rule version of this change). See SYNTAX.md/SKILLS.md.
+    ctor_parameter_list: $ => seq(
+      $.ctor_parameter,
+      repeat(seq(",", $.ctor_parameter)),
+    ),
+
+    ctor_parameter: $ => choice(
+      $.typed_parameter,
+      $.parameter,
+    ),
+
+    typed_parameter: $ => seq(
+      field("name", $.identifier),
+      ":",
+      field("type", $.type_expression),
+    ),
+
+    // Type|Type|... -- e.g. `Int`, `List<Int>`, `Int|Float`, `Int|String|Point`.
+    // Mirrors build_system.c's parse_type_expr/parse_type_atom: a bare name,
+    // or a name with one level of comma-separated generic args (`List<T>`,
+    // `Tuple<T, U, ...>`), "|"-joined into a flat union (no nested unions --
+    // the C parser flattens the same way).
+    type_expression: $ => prec.left(seq(
+      $.type_atom,
+      repeat(seq("|", $.type_atom)),
+    )),
+
+    type_atom: $ => seq(
+      field("name", $.identifier),
+      optional(seq(
+        "<",
+        $.type_expression,
+        repeat(seq(",", $.type_expression)),
+        ">",
+      )),
     ),
 
     // prefer "@" id over a bare "@" when an identifier follows.

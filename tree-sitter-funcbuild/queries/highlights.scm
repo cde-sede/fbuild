@@ -39,6 +39,10 @@
 (parameter (identifier) @variable.parameter)
 (capture (identifier) @variable.parameter)
 
+; Typed ctor params: `name: Type` / `name: Type|Type|...`.
+(typed_parameter name: (identifier) @variable.parameter)
+(type_atom name: (identifier) @type)
+
 ; Keywords.
 [
   "where"
@@ -71,6 +75,7 @@
   "-"
   "/"
   "%"
+  "|"
 ] @operator
 (compare_op) @operator
 
@@ -86,6 +91,7 @@
 [
   ","
   "."
+  ":"
 ] @punctuation.delimiter
 "`" @punctuation.special
 
