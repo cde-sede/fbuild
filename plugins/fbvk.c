@@ -121,6 +121,7 @@
 	X(vkCreateBuffer) \
 	X(vkDestroyBuffer) \
 	X(vkGetBufferMemoryRequirements) \
+	X(vkGetBufferMemoryRequirements2) \
 	X(vkAllocateMemory) \
 	X(vkFreeMemory) \
 	X(vkBindBufferMemory) \
@@ -973,10 +974,19 @@ static fb_Value bi_buffer(fb_State *S, fb_Value *a, int n) {
 		for (int i = 0; i < len; i++) dst[i] = (float)fb_tofloat(fb_at(list, i));
 	}
 
+	/* Informational only -- doesn't change the shared-allocation-per-buffer
+	 * approach above, just reports whether a dedicated VkDeviceMemory would
+	 * have been preferred/required for this buffer. */
+	VkMemoryDedicatedRequirements dedicated = { .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS };
+	VkMemoryRequirements2 req2 = { .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2, .pNext = &dedicated };
+	VkBufferMemoryRequirementsInfo2 info2 = { .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2, .buffer = b->buf };
+	app->fn.vkGetBufferMemoryRequirements2(app->dev, &info2, &req2);
+
 	fb_Value obj = fb_object(S, BUFFER_CLS, b);
 	fb_set(S, obj, "size", fb_int(S, (long)size));
 	fb_set(S, obj, "count", fb_int(S, len));
 	fb_set(S, obj, "usage", fb_str(S, usage_s));
+	fb_set(S, obj, "requires_dedicated_allocation", fb_bool(S, dedicated.requiresDedicatedAllocation));
 	return obj;
 }
 
@@ -1565,6 +1575,7 @@ int fbuild_open(fb_State *S) {
 	fb_class_field(S, BUFFER_CLS, "size", FB_RET_INT, NULL);
 	fb_class_field(S, BUFFER_CLS, "count", FB_RET_INT, NULL);
 	fb_class_field(S, BUFFER_CLS, "usage", FB_RET_STR, NULL);
+	fb_class_field(S, BUFFER_CLS, "requires_dedicated_allocation", FB_RET_BOOL, NULL);
 
 	fb_method(S, SHADER_CLS, "destroy", m_shader_destroy,
 	          &(fb_Reg){ "destroy", m_shader_destroy, 0, 0, FB_RET_BOOL, 0, "destroy the shader module", NULL, 0, NULL, NULL, NULL });
@@ -1618,8 +1629,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 79 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    94 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 80 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    97 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -2032,7 +2043,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkGetBufferDeviceAddressEXT
  * [ ] vkGetBufferDeviceAddressKHR
  * [x] vkGetBufferMemoryRequirements
- * [ ] vkGetBufferMemoryRequirements2
+ * [x] vkGetBufferMemoryRequirements2
  * [ ] vkGetBufferMemoryRequirements2KHR
  * [ ] vkGetBufferOpaqueCaptureAddress
  * [ ] vkGetBufferOpaqueCaptureAddressKHR
@@ -3007,7 +3018,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkBufferMemoryBarrier
  * [ ] VkBufferMemoryBarrier2
  * [ ] VkBufferMemoryBarrier2KHR
- * [ ] VkBufferMemoryRequirementsInfo2
+ * [x] VkBufferMemoryRequirementsInfo2
  * [ ] VkBufferMemoryRequirementsInfo2KHR
  * [ ] VkBufferOpaqueCaptureAddressCreateInfo
  * [ ] VkBufferOpaqueCaptureAddressCreateInfoKHR
@@ -3554,7 +3565,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkMemoryDecompressionMethodFlagsNV
  * [ ] VkMemoryDedicatedAllocateInfo
  * [ ] VkMemoryDedicatedAllocateInfoKHR
- * [ ] VkMemoryDedicatedRequirements
+ * [x] VkMemoryDedicatedRequirements
  * [ ] VkMemoryDedicatedRequirementsKHR
  * [ ] VkMemoryFdPropertiesKHR
  * [ ] VkMemoryGetFdInfoKHR
@@ -3572,7 +3583,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkMemoryPropertyFlagBits
  * [x] VkMemoryPropertyFlags
  * [x] VkMemoryRequirements
- * [ ] VkMemoryRequirements2
+ * [x] VkMemoryRequirements2
  * [ ] VkMemoryRequirements2KHR
  * [ ] VkMemoryToImageCopyEXT
  * [ ] VkMemoryType
