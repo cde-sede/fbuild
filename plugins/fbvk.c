@@ -1691,8 +1691,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 82 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    99 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 83 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    101 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
