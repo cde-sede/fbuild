@@ -89,6 +89,7 @@
 	X(vkAllocateCommandBuffers) \
 	X(vkFreeCommandBuffers) \
 	X(vkResetCommandBuffer) \
+	X(vkResetCommandPool) \
 	X(vkBeginCommandBuffer) \
 	X(vkEndCommandBuffer) \
 	X(vkCmdBeginRenderPass) \
@@ -684,6 +685,18 @@ static fb_Value m_wait_idle(fb_State *S, fb_Value *a, int n) {
 	return fb_bool(S, 1);
 }
 
+/* .reset_command_pool() -> Bool. bulk-reset every command buffer allocated
+ * from this app's command pool back to the initial state in one call,
+ * instead of resetting each command buffer individually -- useful when
+ * abandoning frames mid-recording and starting clean. */
+static fb_Value m_reset_command_pool(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkapp_t *app = fb_object_data(a[0]);
+	VkResult r = app->fn.vkResetCommandPool(app->dev, app->cmdpool, 0);
+	if (r != VK_SUCCESS) return fb_error(S, "vk: vkResetCommandPool failed (%d)", (int)r);
+	return fb_bool(S, 1);
+}
+
 /* .begin_frame(r,g,b[,a]) -> Bool. false = swapchain not ready this tick
  * (minimized / just resized) -- caller should just poll and try again. */
 static fb_Value m_begin_frame(fb_State *S, fb_Value *a, int n) {
@@ -1161,6 +1174,10 @@ int fbuild_open(fb_State *S) {
 	fb_method(S, APP_CLS, "wait_idle", m_wait_idle,
 	          &(fb_Reg){ "wait_idle", m_wait_idle, 0, 0, FB_RET_BOOL, 0,
 	                     "block until the graphics queue is idle", NULL, 0, NULL, NULL, NULL });
+	fb_method(S, APP_CLS, "reset_command_pool", m_reset_command_pool,
+	          &(fb_Reg){ "reset_command_pool", m_reset_command_pool, 0, 0, FB_RET_BOOL, 0,
+	                     "reset every command buffer allocated from this app's command pool at once",
+	                     NULL, 0, NULL, NULL, NULL });
 	fb_method(S, APP_CLS, "begin_frame", m_begin_frame,
 	          &(fb_Reg){ "begin_frame", m_begin_frame, 3, 4, FB_RET_BOOL, 0,
 	                     "acquire swapchain image + begin render pass with clear color r,g,b[,a] (0..1); "
@@ -1260,7 +1277,7 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 66 / 623 wrapped (dlsym'd + called somewhere above).
+ * Commands: 67 / 623 wrapped (dlsym'd + called somewhere above).
  * Types:    79 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
@@ -1861,7 +1878,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkReleaseProfilingLockKHR
  * [ ] vkReleaseSwapchainImagesEXT
  * [x] vkResetCommandBuffer
- * [ ] vkResetCommandPool
+ * [x] vkResetCommandPool
  * [ ] vkResetDescriptorPool
  * [ ] vkResetEvent
  * [x] vkResetFences
