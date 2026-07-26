@@ -134,7 +134,8 @@
 	X(vkGetRenderAreaGranularity) \
 	X(vkCreateSampler) \
 	X(vkDestroySampler) \
-	X(vkGetPhysicalDeviceToolProperties)
+	X(vkGetPhysicalDeviceToolProperties) \
+	X(vkGetDeviceMemoryCommitment)
 
 typedef struct {
 #define X(n) PFN_##n n;
@@ -1143,6 +1144,21 @@ static fb_Value m_buf_invalidate(fb_State *S, fb_Value *a, int n) {
 	return a[0];
 }
 
+/* .memory_committed() -> Int bytes. Reports how many bytes of this buffer's
+ * memory allocation are actually committed by the implementation
+ * (vkGetDeviceMemoryCommitment). Only meaningful divergence from the full
+ * allocation size is for lazily-allocated (VK_MEMORY_PROPERTY_LAZILY_
+ * ALLOCATED_BIT) memory, which this plugin never requests -- for our normal
+ * allocations this just equals .size, but it's a valid, safe, single-call
+ * query regardless. Void Vulkan return, no VkResult to check. */
+static fb_Value m_buf_memory_committed(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkbuf_t *b = fb_object_data(a[0]);
+	VkDeviceSize out = 0;
+	b->app->fn.vkGetDeviceMemoryCommitment(b->app->dev, b->mem, &out);
+	return fb_int(S, (long)out);
+}
+
 static fb_Value m_buf_destroy(fb_State *S, fb_Value *a, int n) {
 	(void)n;
 	vkbuf_t *b = fb_object_data(a[0]);
@@ -1609,6 +1625,12 @@ int fbuild_open(fb_State *S) {
 	                     "subsequent host reads (vkInvalidateMappedMemoryRanges); chainable, "
 	                     "no-op on our HOST_COHERENT buffers but the correct call to make",
 	                     NULL, 0, "Buffer", NULL, NULL });
+	fb_method(S, BUFFER_CLS, "memory_committed", m_buf_memory_committed,
+	          &(fb_Reg){ "memory_committed", m_buf_memory_committed, 0, 0, FB_RET_INT, 0,
+	                     "bytes actually committed for this buffer's memory allocation "
+	                     "(vkGetDeviceMemoryCommitment); equals .size except for lazily-"
+	                     "allocated memory",
+	                     NULL, 0, NULL, NULL, NULL });
 	fb_method(S, BUFFER_CLS, "destroy", m_buf_destroy,
 	          &(fb_Reg){ "destroy", m_buf_destroy, 0, 0, FB_RET_BOOL, 0, "free GPU memory", NULL, 0, NULL, NULL, NULL });
 	fb_class_field(S, BUFFER_CLS, "size", FB_RET_INT, NULL);
@@ -2113,7 +2135,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkGetDeviceImageSparseMemoryRequirements
  * [ ] vkGetDeviceImageSparseMemoryRequirementsKHR
  * [ ] vkGetDeviceImageSubresourceLayoutKHR
- * [ ] vkGetDeviceMemoryCommitment
+ * [x] vkGetDeviceMemoryCommitment
  * [ ] vkGetDeviceMemoryOpaqueCaptureAddress
  * [ ] vkGetDeviceMemoryOpaqueCaptureAddressKHR
  * [ ] vkGetDeviceMicromapCompatibilityEXT
