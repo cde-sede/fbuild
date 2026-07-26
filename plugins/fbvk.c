@@ -124,7 +124,8 @@
 	X(vkBindBufferMemory) \
 	X(vkMapMemory) \
 	X(vkUnmapMemory) \
-	X(vkEnumerateInstanceVersion)
+	X(vkEnumerateInstanceVersion) \
+	X(vkEnumerateInstanceLayerProperties)
 
 typedef struct {
 #define X(n) PFN_##n n;
@@ -417,6 +418,32 @@ static fb_Value bi_api_version(fb_State *S, fb_Value *a, int n) {
 	snprintf(buf, sizeof buf, "%u.%u.%u",
 	         (unsigned)VK_API_VERSION_MAJOR(ver), (unsigned)VK_API_VERSION_MINOR(ver), (unsigned)VK_API_VERSION_PATCH(ver));
 	return fb_str(S, buf);
+}
+
+/* vk.instance_layers() -> List<String>: names of the Vulkan instance layers
+ * available on this system (validation layers, overlay layers, etc. -- e.g.
+ * "VK_LAYER_KHRONOS_validation" if the LunarG SDK/validation layer is
+ * installed). No window needed -- same throwaway-instance trick as
+ * vk.devices()/vk.api_version() above. */
+static fb_Value bi_instance_layers(fb_State *S, fb_Value *a, int n) {
+	(void)a; (void)n;
+	if (!ensure_loader(S)) return fb_nil(S);
+	vk_fns_t fn;
+	VkInstance inst = make_instance(S, "fbvk-query", 0, &fn);
+	if (!inst) return fb_nil(S);
+
+	uint32_t count = 0;
+	fn.vkEnumerateInstanceLayerProperties(&count, NULL);
+	VkLayerProperties *layers = malloc(sizeof(*layers) * (count ? count : 1));
+	VkResult r = fn.vkEnumerateInstanceLayerProperties(&count, layers);
+	fn.vkDestroyInstance(inst, NULL);
+	if (r != VK_SUCCESS) { free(layers); return fb_error(S, "vk: vkEnumerateInstanceLayerProperties failed (%d)", (int)r); }
+
+	fb_Value list = fb_list(S);
+	for (uint32_t i = 0; i < count; i++)
+		fb_push(S, list, fb_str(S, layers[i].layerName));
+	free(layers);
+	return list;
 }
 
 /* ---- app construction ---------------------------------------------------- */
@@ -1432,6 +1459,10 @@ int fbuild_open(fb_State *S) {
 	          &(fb_Reg){ "api_version", bi_api_version, 0, 0, FB_RET_STR, 0,
 	                     "Vulkan loader/instance API version (\"major.minor.patch\"); no window needed",
 	                     NULL, 0, NULL, NULL, NULL });
+	fb_method(S, VK_CLS, "instance_layers", bi_instance_layers,
+	          &(fb_Reg){ "instance_layers", bi_instance_layers, 0, 0, FB_RET_LIST_STR, 0,
+	                     "names of available Vulkan instance layers (validation/overlay/etc); no window needed",
+	                     NULL, 0, NULL, NULL, NULL });
 
 	fb_Value obj = fb_object(S, VK_CLS, NULL);
 	fb_register(S, &(fb_Reg){ "vk", m_noncallable, 0, -1, FB_RET_ANY, FB_GLOBAL,
@@ -1455,8 +1486,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 72 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    84 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 73 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    85 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -1850,7 +1881,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkEnumerateDeviceExtensionProperties
  * [ ] vkEnumerateDeviceLayerProperties
  * [ ] vkEnumerateInstanceExtensionProperties
- * [ ] vkEnumerateInstanceLayerProperties
+ * [x] vkEnumerateInstanceLayerProperties
  * [x] vkEnumerateInstanceVersion
  * [ ] vkEnumeratePhysicalDeviceGroups
  * [ ] vkEnumeratePhysicalDeviceGroupsKHR
@@ -3370,7 +3401,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkLatencySurfaceCapabilitiesNV
  * [ ] VkLatencyTimingsFrameReportNV
  * [ ] VkLayeredDriverUnderlyingApiMSFT
- * [ ] VkLayerProperties
+ * [x] VkLayerProperties
  * [ ] VkLayerSettingEXT
  * [ ] VkLayerSettingsCreateInfoEXT
  * [ ] VkLayerSettingTypeEXT
