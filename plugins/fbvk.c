@@ -110,6 +110,7 @@
 	X(vkQueueSubmit) \
 	X(vkQueuePresentKHR) \
 	X(vkDeviceWaitIdle) \
+	X(vkQueueWaitIdle) \
 	X(vkCreateBuffer) \
 	X(vkDestroyBuffer) \
 	X(vkGetBufferMemoryRequirements) \
@@ -673,6 +674,16 @@ static fb_Value m_poll(fb_State *S, fb_Value *a, int n) {
 	return a[0];
 }
 
+/* .wait_idle() -> Bool. block until the graphics queue has drained --
+ * useful before touching/destroying a resource still in flight. */
+static fb_Value m_wait_idle(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkapp_t *app = fb_object_data(a[0]);
+	VkResult r = app->fn.vkQueueWaitIdle(app->queue);
+	if (r != VK_SUCCESS) return fb_error(S, "vk: vkQueueWaitIdle failed (%d)", (int)r);
+	return fb_bool(S, 1);
+}
+
 /* .begin_frame(r,g,b[,a]) -> Bool. false = swapchain not ready this tick
  * (minimized / just resized) -- caller should just poll and try again. */
 static fb_Value m_begin_frame(fb_State *S, fb_Value *a, int n) {
@@ -1147,6 +1158,9 @@ int fbuild_open(fb_State *S) {
 	fb_method(S, APP_CLS, "poll", m_poll,
 	          &(fb_Reg){ "poll", m_poll, 0, 0, FB_RET_ANY, 0, "pump window/input events; chainable",
 	                     NULL, 0, "App", NULL, NULL });
+	fb_method(S, APP_CLS, "wait_idle", m_wait_idle,
+	          &(fb_Reg){ "wait_idle", m_wait_idle, 0, 0, FB_RET_BOOL, 0,
+	                     "block until the graphics queue is idle", NULL, 0, NULL, NULL, NULL });
 	fb_method(S, APP_CLS, "begin_frame", m_begin_frame,
 	          &(fb_Reg){ "begin_frame", m_begin_frame, 3, 4, FB_RET_BOOL, 0,
 	                     "acquire swapchain image + begin render pass with clear color r,g,b[,a] (0..1); "
@@ -1246,7 +1260,7 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 65 / 623 wrapped (dlsym'd + called somewhere above).
+ * Commands: 66 / 623 wrapped (dlsym'd + called somewhere above).
  * Types:    79 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
@@ -1839,7 +1853,7 @@ int fbuild_open(fb_State *S) {
  * [x] vkQueueSubmit
  * [ ] vkQueueSubmit2
  * [ ] vkQueueSubmit2KHR
- * [ ] vkQueueWaitIdle
+ * [x] vkQueueWaitIdle
  * [ ] vkRegisterDeviceEventEXT
  * [ ] vkRegisterDisplayEventEXT
  * [ ] vkReleaseDisplayEXT
