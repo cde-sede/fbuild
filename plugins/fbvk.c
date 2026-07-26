@@ -106,6 +106,7 @@
 	X(vkCmdDrawIndexed) \
 	X(vkCmdFillBuffer) \
 	X(vkCmdCopyBuffer) \
+	X(vkCmdPipelineBarrier) \
 	X(vkCreateSemaphore) \
 	X(vkDestroySemaphore) \
 	X(vkCreateFence) \
@@ -936,6 +937,27 @@ static fb_Value m_end_frame(fb_State *S, fb_Value *a, int n) {
 	return a[0];
 }
 
+/* .barrier() -> App (chainable). Minimal global memory barrier: ALL_COMMANDS
+ * -> ALL_COMMANDS stage, MEMORY_READ|MEMORY_WRITE -> MEMORY_READ|MEMORY_WRITE
+ * access, no buffer/image barriers. Manual sync point inside the current
+ * frame's command buffer (e.g. between a Buffer.fill/copy_to-style op and a
+ * subsequent draw) -- must be called between begin_frame/end_frame. */
+static fb_Value m_barrier(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkapp_t *app = fb_object_data(a[0]);
+	if (!app->frame_active) return fb_error(S, "vk: barrier called outside begin_frame/end_frame");
+
+	VkCommandBuffer cb = app->cmdbufs[app->frame];
+	VkMemoryBarrier mb = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+		.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+		.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+	};
+	app->fn.vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+	                              0, 1, &mb, 0, NULL, 0, NULL);
+	return a[0];
+}
+
 /* .buffer(list, usage) -> Buffer. Host-visible + coherent, persistently
  * mapped: simplest correct approach for a scripting wrapper (no staging
  * buffer / device-local upload -- fine for the vertex/index/uniform data
@@ -1555,6 +1577,11 @@ int fbuild_open(fb_State *S) {
 	fb_method(S, APP_CLS, "end_frame", m_end_frame,
 	          &(fb_Reg){ "end_frame", m_end_frame, 0, 0, FB_RET_ANY, 0,
 	                     "end render pass, submit, present; chainable", NULL, 0, "App", NULL, NULL });
+	fb_method(S, APP_CLS, "barrier", m_barrier,
+	          &(fb_Reg){ "barrier", m_barrier, 0, 0, FB_RET_ANY, 0,
+	                     "minimal global memory barrier (ALL_COMMANDS -> ALL_COMMANDS, "
+	                     "MEMORY_READ|WRITE -> MEMORY_READ|WRITE); chainable. Must be between begin_frame/end_frame",
+	                     NULL, 0, "App", NULL, NULL });
 	static const fb_Ret buf_params[] = { FB_RET_LIST, FB_RET_STR };
 	fb_method(S, APP_CLS, "buffer", bi_buffer,
 	          &(fb_Reg){ "buffer", bi_buffer, 2, 2, FB_RET_ANY, 0,
@@ -1691,8 +1718,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 83 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    101 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 84 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    104 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -1837,7 +1864,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkCmdNextSubpass2
  * [ ] vkCmdNextSubpass2KHR
  * [ ] vkCmdOpticalFlowExecuteNV
- * [ ] vkCmdPipelineBarrier
+ * [x] vkCmdPipelineBarrier
  * [ ] vkCmdPipelineBarrier2
  * [ ] vkCmdPipelineBarrier2KHR
  * [ ] vkCmdPreprocessGeneratedCommandsNV
@@ -3003,7 +3030,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkAccessFlagBits
  * [ ] VkAccessFlagBits2
  * [ ] VkAccessFlagBits2KHR
- * [ ] VkAccessFlags
+ * [x] VkAccessFlags
  * [ ] VkAccessFlags2
  * [ ] VkAccessFlags2KHR
  * [ ] VkAcquireNextImageInfoKHR
@@ -3225,7 +3252,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkDedicatedAllocationMemoryAllocateInfoNV
  * [ ] VkDeferredOperationKHR
  * [ ] VkDependencyFlagBits
- * [ ] VkDependencyFlags
+ * [x] VkDependencyFlags
  * [ ] VkDependencyInfo
  * [ ] VkDependencyInfoKHR
  * [ ] VkDepthBiasInfoEXT
@@ -3620,7 +3647,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkMemoryAllocateFlagsInfoKHR
  * [ ] VkMemoryAllocateFlagsKHR
  * [x] VkMemoryAllocateInfo
- * [ ] VkMemoryBarrier
+ * [x] VkMemoryBarrier
  * [ ] VkMemoryBarrier2
  * [ ] VkMemoryBarrier2KHR
  * [ ] VkMemoryDecompressionMethodFlagBitsNV
