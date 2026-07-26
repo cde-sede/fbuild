@@ -128,6 +128,7 @@
 	X(vkMapMemory) \
 	X(vkUnmapMemory) \
 	X(vkInvalidateMappedMemoryRanges) \
+	X(vkFlushMappedMemoryRanges) \
 	X(vkEnumerateInstanceVersion) \
 	X(vkEnumerateInstanceLayerProperties) \
 	X(vkGetRenderAreaGranularity) \
@@ -1105,6 +1106,24 @@ static fb_Value m_buf_copy_to(fb_State *S, fb_Value *a, int n) {
 	return a[0];
 }
 
+/* .flush() -> self. Makes host writes into this buffer's mapped memory
+ * visible to the GPU (vkFlushMappedMemoryRanges). Every buffer here is
+ * allocated HOST_COHERENT, so this is a no-op on real Vulkan
+ * implementations today -- exposed anyway as the standard/correct call a
+ * script should be able to make explicitly after writing to buffer memory
+ * from the host (e.g. via .update()) and before the GPU reads it. */
+static fb_Value m_buf_flush(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkbuf_t *b = fb_object_data(a[0]);
+	VkMappedMemoryRange range = {
+		.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+		.memory = b->mem, .offset = 0, .size = VK_WHOLE_SIZE,
+	};
+	VkResult r = b->app->fn.vkFlushMappedMemoryRanges(b->app->dev, 1, &range);
+	if (r != VK_SUCCESS) return fb_error(S, "vk: vkFlushMappedMemoryRanges failed (%d)", (int)r);
+	return a[0];
+}
+
 /* .invalidate() -> self. Host-side counterpart to a GPU-side flush: makes
  * writes the GPU made into this buffer's mapped memory visible to
  * subsequent host reads (vkInvalidateMappedMemoryRanges). Every buffer here
@@ -1578,6 +1597,12 @@ int fbuild_open(fb_State *S) {
 	                     "min(size, dst.size) bytes; chainable, no host memory involved",
 	                     copy_to_params, 1, "Buffer", NULL, NULL });
 	fb_reg_param_class("Buffer.copy_to", 0, "Buffer");
+	fb_method(S, BUFFER_CLS, "flush", m_buf_flush,
+	          &(fb_Reg){ "flush", m_buf_flush, 0, 0, FB_RET_ANY, 0,
+	                     "make host writes into this buffer's mapped memory visible to "
+	                     "the GPU (vkFlushMappedMemoryRanges); chainable, "
+	                     "no-op on our HOST_COHERENT buffers but the correct call to make",
+	                     NULL, 0, "Buffer", NULL, NULL });
 	fb_method(S, BUFFER_CLS, "invalidate", m_buf_invalidate,
 	          &(fb_Reg){ "invalidate", m_buf_invalidate, 0, 0, FB_RET_ANY, 0,
 	                     "make GPU writes into this buffer's mapped memory visible to "
@@ -1644,7 +1669,7 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 81 / 623 wrapped (dlsym'd + called somewhere above).
+ * Commands: 82 / 623 wrapped (dlsym'd + called somewhere above).
  * Types:    99 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
@@ -2045,7 +2070,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkEnumeratePhysicalDeviceGroupsKHR
  * [ ] vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR
  * [x] vkEnumeratePhysicalDevices
- * [ ] vkFlushMappedMemoryRanges
+ * [x] vkFlushMappedMemoryRanges
  * [x] vkFreeCommandBuffers
  * [ ] vkFreeDescriptorSets
  * [x] vkFreeMemory
