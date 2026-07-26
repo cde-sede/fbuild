@@ -104,6 +104,7 @@
 	X(vkCmdBindIndexBuffer) \
 	X(vkCmdDraw) \
 	X(vkCmdDrawIndexed) \
+	X(vkCmdDrawIndirect) \
 	X(vkCmdFillBuffer) \
 	X(vkCmdCopyBuffer) \
 	X(vkCmdPipelineBarrier) \
@@ -902,6 +903,23 @@ static fb_Value m_draw_indexed(fb_State *S, fb_Value *a, int n) {
 	return a[0];
 }
 
+/* .draw_indirect(pipeline, buffer[, count]) -> self. Like .draw() but the
+ * per-draw parameters (vertexCount/instanceCount/firstVertex/firstInstance)
+ * come from `buffer`, packed as `count` back-to-back VkDrawIndirectCommand
+ * records (buffer must be built with usage "indirect", uint32-encoded). */
+static fb_Value m_draw_indirect(fb_State *S, fb_Value *a, int n) {
+	vkapp_t *app = fb_object_data(a[0]);
+	if (!app->frame_active) return fb_error(S, "vk: draw_indirect called outside begin_frame/end_frame");
+	vkpipe_t *pipe = fb_object_data(a[1]);
+	vkbuf_t *ibuf = fb_object_data(a[2]);
+	long draw_count = n >= 4 ? fb_toint(a[3]) : 1;
+
+	VkCommandBuffer cb = app->cmdbufs[app->frame];
+	app->fn.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe->pipeline);
+	app->fn.vkCmdDrawIndirect(cb, ibuf->buf, 0, (uint32_t)draw_count, sizeof(VkDrawIndirectCommand));
+	return a[0];
+}
+
 static fb_Value m_end_frame(fb_State *S, fb_Value *a, int n) {
 	(void)n;
 	vkapp_t *app = fb_object_data(a[0]);
@@ -969,21 +987,27 @@ static fb_Value bi_buffer(fb_State *S, fb_Value *a, int n) {
 	const char *usage_s = P(a[2]);
 
 	int is_index = strcmp(usage_s, "index") == 0;
+	int is_indirect = strcmp(usage_s, "indirect") == 0;
+	/* index buffers (uint32 indices) and indirect-args buffers (packed
+	 * VkDrawIndirectCommand, all-uint32 fields) share the same uint32
+	 * host encoding below; everything else encodes as float. */
+	int is_uint32 = is_index || is_indirect;
 	VkBufferUsageFlags usage;
 	if (strcmp(usage_s, "vertex") == 0) usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 	else if (is_index) usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 	else if (strcmp(usage_s, "uniform") == 0) usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-	else return fb_error(S, "vk: buffer usage must be \"vertex\", \"index\", or \"uniform\", got \"%s\"", usage_s);
+	else if (is_indirect) usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+	else return fb_error(S, "vk: buffer usage must be \"vertex\", \"index\", \"uniform\", or \"indirect\", got \"%s\"", usage_s);
 	usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT; /* lets .fill() (vkCmdFillBuffer) target it */
 	usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT; /* lets .copy_to() (vkCmdCopyBuffer) read it */
 
 	int len = fb_len(list);
-	size_t elem_size = is_index ? sizeof(uint32_t) : sizeof(float);
+	size_t elem_size = is_uint32 ? sizeof(uint32_t) : sizeof(float);
 	VkDeviceSize size = (VkDeviceSize)len * elem_size;
 	if (size == 0) size = elem_size;
 
 	vkbuf_t *b = calloc(1, sizeof *b);
-	b->app = app; b->count = len; b->is_index = is_index; b->size = size;
+	b->app = app; b->count = len; b->is_index = is_uint32; b->size = size;
 
 	VkBufferCreateInfo bci = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -1004,7 +1028,7 @@ static fb_Value bi_buffer(fb_State *S, fb_Value *a, int n) {
 	app->fn.vkBindBufferMemory(app->dev, b->buf, b->mem, 0);
 	app->fn.vkMapMemory(app->dev, b->mem, 0, size, 0, &b->mapped);
 
-	if (is_index) {
+	if (is_uint32) {
 		uint32_t *dst = b->mapped;
 		for (int i = 0; i < len; i++) dst[i] = (uint32_t)fb_toint(fb_at(list, i));
 	} else {
@@ -1574,6 +1598,14 @@ int fbuild_open(fb_State *S) {
 	fb_reg_param_class("App.draw_indexed", 0, "Pipeline");
 	fb_reg_param_class("App.draw_indexed", 1, "Buffer");
 	fb_reg_param_class("App.draw_indexed", 2, "Buffer");
+	static const fb_Ret draw_indirect_types[] = { FB_RET_ANY, FB_RET_ANY, FB_RET_INT };
+	fb_method(S, APP_CLS, "draw_indirect", m_draw_indirect,
+	          &(fb_Reg){ "draw_indirect", m_draw_indirect, 2, 3, FB_RET_ANY, 0,
+	                     "bind pipeline, vkCmdDrawIndirect reading draw params from buffer "
+	                     "(usage \"indirect\"); chainable. Must be between begin_frame/end_frame",
+	                     draw_indirect_types, 3, "App", NULL, NULL });
+	fb_reg_param_class("App.draw_indirect", 0, "Pipeline");
+	fb_reg_param_class("App.draw_indirect", 1, "Buffer");
 	fb_method(S, APP_CLS, "end_frame", m_end_frame,
 	          &(fb_Reg){ "end_frame", m_end_frame, 0, 0, FB_RET_ANY, 0,
 	                     "end render pass, submit, present; chainable", NULL, 0, "App", NULL, NULL });
@@ -1718,8 +1750,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 84 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    104 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 85 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    105 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -1831,7 +1863,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkCmdDrawIndexedIndirectCount
  * [ ] vkCmdDrawIndexedIndirectCountAMD
  * [ ] vkCmdDrawIndexedIndirectCountKHR
- * [ ] vkCmdDrawIndirect
+ * [x] vkCmdDrawIndirect
  * [ ] vkCmdDrawIndirectByteCountEXT
  * [ ] vkCmdDrawIndirectCount
  * [ ] vkCmdDrawIndirectCountAMD
@@ -3396,7 +3428,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkDisplaySurfaceCreateFlagsKHR
  * [ ] VkDisplaySurfaceCreateInfoKHR
  * [ ] VkDrawIndexedIndirectCommand
- * [ ] VkDrawIndirectCommand
+ * [x] VkDrawIndirectCommand
  * [ ] VkDrawMeshTasksIndirectCommandEXT
  * [ ] VkDrawMeshTasksIndirectCommandNV
  * [ ] VkDriverId
