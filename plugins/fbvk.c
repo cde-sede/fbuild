@@ -107,6 +107,7 @@
 	X(vkDestroyFence) \
 	X(vkWaitForFences) \
 	X(vkResetFences) \
+	X(vkGetFenceStatus) \
 	X(vkAcquireNextImageKHR) \
 	X(vkQueueSubmit) \
 	X(vkQueuePresentKHR) \
@@ -697,6 +698,22 @@ static fb_Value m_reset_command_pool(fb_State *S, fb_Value *a, int n) {
 	return fb_bool(S, 1);
 }
 
+/* .frame_ready() -> Bool. non-blocking poll of the current frame slot's
+ * in-flight fence -- true once the GPU has finished the last submission that
+ * used this slot (the same fence begin_frame would otherwise block on),
+ * false if it's still executing. Lets a script pace itself (skip other work
+ * while waiting) instead of only having the blocking begin_frame/wait_idle
+ * choice. */
+static fb_Value m_frame_ready(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkapp_t *app = fb_object_data(a[0]);
+	VkFence fence = app->in_flight[app->frame];
+	VkResult r = app->fn.vkGetFenceStatus(app->dev, fence);
+	if (r == VK_SUCCESS) return fb_bool(S, 1);
+	if (r == VK_NOT_READY) return fb_bool(S, 0);
+	return fb_error(S, "vk: vkGetFenceStatus failed (%d)", (int)r);
+}
+
 /* .begin_frame(r,g,b[,a]) -> Bool. false = swapchain not ready this tick
  * (minimized / just resized) -- caller should just poll and try again. */
 static fb_Value m_begin_frame(fb_State *S, fb_Value *a, int n) {
@@ -1178,6 +1195,10 @@ int fbuild_open(fb_State *S) {
 	          &(fb_Reg){ "reset_command_pool", m_reset_command_pool, 0, 0, FB_RET_BOOL, 0,
 	                     "reset every command buffer allocated from this app's command pool at once",
 	                     NULL, 0, NULL, NULL, NULL });
+	fb_method(S, APP_CLS, "frame_ready", m_frame_ready,
+	          &(fb_Reg){ "frame_ready", m_frame_ready, 0, 0, FB_RET_BOOL, 0,
+	                     "non-blocking check: has the GPU finished the current frame slot's last submission",
+	                     NULL, 0, NULL, NULL, NULL });
 	fb_method(S, APP_CLS, "begin_frame", m_begin_frame,
 	          &(fb_Reg){ "begin_frame", m_begin_frame, 3, 4, FB_RET_BOOL, 0,
 	                     "acquire swapchain image + begin render pass with clear color r,g,b[,a] (0..1); "
@@ -1277,7 +1298,7 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 67 / 623 wrapped (dlsym'd + called somewhere above).
+ * Commands: 68 / 623 wrapped (dlsym'd + called somewhere above).
  * Types:    79 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
@@ -1739,7 +1760,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkGetEncodedVideoSessionParametersKHR
  * [ ] vkGetEventStatus
  * [ ] vkGetFenceFdKHR
- * [ ] vkGetFenceStatus
+ * [x] vkGetFenceStatus
  * [ ] vkGetFramebufferTilePropertiesQCOM
  * [ ] vkGetGeneratedCommandsMemoryRequirementsNV
  * [ ] vkGetImageDrmFormatModifierPropertiesEXT
