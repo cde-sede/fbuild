@@ -132,7 +132,8 @@
 	X(vkEnumerateInstanceLayerProperties) \
 	X(vkGetRenderAreaGranularity) \
 	X(vkCreateSampler) \
-	X(vkDestroySampler)
+	X(vkDestroySampler) \
+	X(vkGetPhysicalDeviceToolProperties)
 
 typedef struct {
 #define X(n) PFN_##n n;
@@ -410,6 +411,19 @@ static fb_Value bi_devices(fb_State *S, fb_Value *a, int n) {
 				fb_push(S, extensions, fb_str(S, exts[e].extensionName));
 		free(exts);
 		fb_set(S, dev, "extensions", extensions);
+
+		uint32_t tool_count = 0;
+		fn.vkGetPhysicalDeviceToolProperties(devs[i], &tool_count, NULL);
+		VkPhysicalDeviceToolProperties *tools = malloc(sizeof(*tools) * (tool_count ? tool_count : 1));
+		for (uint32_t t = 0; t < tool_count; t++)
+			tools[t] = (VkPhysicalDeviceToolProperties){ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TOOL_PROPERTIES };
+		VkResult tr = fn.vkGetPhysicalDeviceToolProperties(devs[i], &tool_count, tools);
+		fb_Value active_tools = fb_list(S);
+		if (tr == VK_SUCCESS)
+			for (uint32_t t = 0; t < tool_count; t++)
+				fb_push(S, active_tools, fb_str(S, tools[t].name));
+		free(tools);
+		fb_set(S, dev, "active_tools", active_tools);
 
 		fb_push(S, list, dev);
 	}
@@ -1594,10 +1608,11 @@ int fbuild_open(fb_State *S) {
 	                     app_params, 4, "App", NULL, NULL });
 	fb_class_field(S, DEVICE_CLS, "features", FB_RET_MAP, NULL);
 	fb_class_field(S, DEVICE_CLS, "extensions", FB_RET_LIST_STR, NULL);
+	fb_class_field(S, DEVICE_CLS, "active_tools", FB_RET_LIST_STR, NULL);
 	fb_method(S, VK_CLS, "devices", bi_devices,
 	          &(fb_Reg){ "devices", bi_devices, 0, 0, FB_RET_LIST, 0,
 	                     "enumerate Vulkan-capable GPUs (no window needed): name, type, vram, "
-	                     "api_version, driver_version, limits, features, extensions", NULL, 0, NULL, NULL, NULL });
+	                     "api_version, driver_version, limits, features, extensions, active_tools", NULL, 0, NULL, NULL, NULL });
 	fb_method(S, VK_CLS, "api_version", bi_api_version,
 	          &(fb_Reg){ "api_version", bi_api_version, 0, 0, FB_RET_STR, 0,
 	                     "Vulkan loader/instance API version (\"major.minor.patch\"); no window needed",
@@ -1629,8 +1644,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 80 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    97 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 81 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    99 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -2166,7 +2181,7 @@ int fbuild_open(fb_State *S) {
  * [x] vkGetPhysicalDeviceSurfaceFormatsKHR
  * [x] vkGetPhysicalDeviceSurfacePresentModesKHR
  * [x] vkGetPhysicalDeviceSurfaceSupportKHR
- * [ ] vkGetPhysicalDeviceToolProperties
+ * [x] vkGetPhysicalDeviceToolProperties
  * [ ] vkGetPhysicalDeviceToolPropertiesEXT
  * [ ] vkGetPhysicalDeviceVideoCapabilitiesKHR
  * [ ] vkGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR
@@ -2797,7 +2812,7 @@ int fbuild_open(fb_State *S) {
  * [ ] PFN_vkGetPhysicalDeviceSurfaceFormatsKHR
  * [ ] PFN_vkGetPhysicalDeviceSurfacePresentModesKHR
  * [ ] PFN_vkGetPhysicalDeviceSurfaceSupportKHR
- * [ ] PFN_vkGetPhysicalDeviceToolProperties
+ * [x] PFN_vkGetPhysicalDeviceToolProperties
  * [ ] PFN_vkGetPhysicalDeviceToolPropertiesEXT
  * [ ] PFN_vkGetPhysicalDeviceVideoCapabilitiesKHR
  * [ ] PFN_vkGetPhysicalDeviceVideoEncodeQualityLevelPropertiesKHR
@@ -3975,7 +3990,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkPhysicalDeviceTimelineSemaphoreFeaturesKHR
  * [ ] VkPhysicalDeviceTimelineSemaphoreProperties
  * [ ] VkPhysicalDeviceTimelineSemaphorePropertiesKHR
- * [ ] VkPhysicalDeviceToolProperties
+ * [x] VkPhysicalDeviceToolProperties
  * [ ] VkPhysicalDeviceToolPropertiesEXT
  * [ ] VkPhysicalDeviceTransformFeedbackFeaturesEXT
  * [ ] VkPhysicalDeviceTransformFeedbackPropertiesEXT
