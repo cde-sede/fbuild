@@ -120,7 +120,8 @@
 	X(vkFreeMemory) \
 	X(vkBindBufferMemory) \
 	X(vkMapMemory) \
-	X(vkUnmapMemory)
+	X(vkUnmapMemory) \
+	X(vkEnumerateInstanceVersion)
 
 typedef struct {
 #define X(n) PFN_##n n;
@@ -388,6 +389,31 @@ static fb_Value bi_devices(fb_State *S, fb_Value *a, int n) {
 	free(devs);
 	fn.vkDestroyInstance(inst, NULL);
 	return list;
+}
+
+/* vk.api_version() -> String: the Vulkan loader/instance API version
+ * ("major.minor.patch"), e.g. what vkCreateInstance's apiVersion field can
+ * safely request. No window needed -- same throwaway-instance trick as
+ * vk.devices() above (vkEnumerateInstanceVersion is a global-level command,
+ * but the real Vulkan Loader resolves it the same way through any valid
+ * instance's vkGetInstanceProcAddr, same as the device-level commands do --
+ * see load_fns's comment). */
+static fb_Value bi_api_version(fb_State *S, fb_Value *a, int n) {
+	(void)a; (void)n;
+	if (!ensure_loader(S)) return fb_nil(S);
+	vk_fns_t fn;
+	VkInstance inst = make_instance(S, "fbvk-query", 0, &fn);
+	if (!inst) return fb_nil(S);
+
+	uint32_t ver = 0;
+	VkResult r = fn.vkEnumerateInstanceVersion(&ver);
+	fn.vkDestroyInstance(inst, NULL);
+	if (r != VK_SUCCESS) return fb_error(S, "vk: vkEnumerateInstanceVersion failed (%d)", (int)r);
+
+	char buf[32];
+	snprintf(buf, sizeof buf, "%u.%u.%u",
+	         (unsigned)VK_API_VERSION_MAJOR(ver), (unsigned)VK_API_VERSION_MINOR(ver), (unsigned)VK_API_VERSION_PATCH(ver));
+	return fb_str(S, buf);
 }
 
 /* ---- app construction ---------------------------------------------------- */
@@ -1275,6 +1301,10 @@ int fbuild_open(fb_State *S) {
 	          &(fb_Reg){ "devices", bi_devices, 0, 0, FB_RET_LIST, 0,
 	                     "enumerate Vulkan-capable GPUs (no window needed): name, type, vram, "
 	                     "api_version, driver_version, limits, features", NULL, 0, NULL, NULL, NULL });
+	fb_method(S, VK_CLS, "api_version", bi_api_version,
+	          &(fb_Reg){ "api_version", bi_api_version, 0, 0, FB_RET_STR, 0,
+	                     "Vulkan loader/instance API version (\"major.minor.patch\"); no window needed",
+	                     NULL, 0, NULL, NULL, NULL });
 
 	fb_Value obj = fb_object(S, VK_CLS, NULL);
 	fb_register(S, &(fb_Reg){ "vk", m_noncallable, 0, -1, FB_RET_ANY, FB_GLOBAL,
@@ -1298,8 +1328,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 68 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    79 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 69 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    80 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -1694,7 +1724,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkEnumerateDeviceLayerProperties
  * [ ] vkEnumerateInstanceExtensionProperties
  * [ ] vkEnumerateInstanceLayerProperties
- * [ ] vkEnumerateInstanceVersion
+ * [x] vkEnumerateInstanceVersion
  * [ ] vkEnumeratePhysicalDeviceGroups
  * [ ] vkEnumeratePhysicalDeviceGroupsKHR
  * [ ] vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR
@@ -2323,7 +2353,7 @@ int fbuild_open(fb_State *S) {
  * [ ] PFN_vkEnumerateDeviceLayerProperties
  * [ ] PFN_vkEnumerateInstanceExtensionProperties
  * [ ] PFN_vkEnumerateInstanceLayerProperties
- * [ ] PFN_vkEnumerateInstanceVersion
+ * [x] PFN_vkEnumerateInstanceVersion
  * [ ] PFN_vkEnumeratePhysicalDeviceGroups
  * [ ] PFN_vkEnumeratePhysicalDeviceGroupsKHR
  * [ ] PFN_vkEnumeratePhysicalDeviceQueueFamilyPerformanceQueryCountersKHR
