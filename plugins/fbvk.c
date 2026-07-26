@@ -59,6 +59,7 @@
 	X(vkEnumeratePhysicalDevices) \
 	X(vkGetPhysicalDeviceProperties) \
 	X(vkGetPhysicalDeviceFeatures) \
+	X(vkGetPhysicalDeviceFormatProperties) \
 	X(vkGetPhysicalDeviceMemoryProperties) \
 	X(vkGetPhysicalDeviceQueueFamilyProperties) \
 	X(vkGetPhysicalDeviceSurfaceSupportKHR) \
@@ -1046,6 +1047,26 @@ static fb_Value m_shader_destroy(fb_State *S, fb_Value *a, int n) {
 	return fb_bool(S, 1);
 }
 
+/* .vertex_format_supported(comps) -> Bool. `comps` is a per-attribute float
+ * component count (1..4), exactly what pipeline()'s `layout` list elements
+ * are -- this checks whether the VkFormat that comps maps to there
+ * (R32_SFLOAT..R32G32B32A32_SFLOAT) is actually usable as a vertex buffer
+ * format on this device, so a script can sanity-check a layout before
+ * building a pipeline with it instead of only finding out from a validation
+ * layer message. Every mainstream GPU supports all four, but the query costs
+ * nothing and this is what real Vulkan code does before trusting a format. */
+static fb_Value m_vertex_format_supported(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkapp_t *app = fb_object_data(a[0]);
+	int comps = (int)fb_toint(a[1]);
+	VkFormat fmt = comps == 1 ? VK_FORMAT_R32_SFLOAT :
+	               comps == 2 ? VK_FORMAT_R32G32_SFLOAT :
+	               comps == 3 ? VK_FORMAT_R32G32B32_SFLOAT : VK_FORMAT_R32G32B32A32_SFLOAT;
+	VkFormatProperties props;
+	app->fn.vkGetPhysicalDeviceFormatProperties(app->phys, fmt, &props);
+	return fb_bool(S, (props.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) != 0);
+}
+
 /* .pipeline(vert, frag, layout[, opts]) -> Pipeline. `layout` is a list of
  * per-attribute float component counts, e.g. List<3,3> = a tightly packed
  * vec3 position + vec3 color per vertex (one binding, one buffer). */
@@ -1266,6 +1287,12 @@ int fbuild_open(fb_State *S) {
 	                     pipe_types, 4, "Pipeline", NULL, NULL });
 	fb_reg_param_class("App.pipeline", 0, "Shader");
 	fb_reg_param_class("App.pipeline", 1, "Shader");
+	static const fb_Ret vfmt_params[] = { FB_RET_INT };
+	fb_method(S, APP_CLS, "vertex_format_supported", m_vertex_format_supported,
+	          &(fb_Reg){ "vertex_format_supported", m_vertex_format_supported, 1, 1, FB_RET_BOOL, 0,
+	                     "true if this device supports a comps-float (1..4) vertex attribute format, "
+	                     "the same VkFormat pipeline()'s layout list would pick for that comps value",
+	                     vfmt_params, 1, NULL, NULL, NULL });
 	fb_method(S, APP_CLS, "destroy", m_app_destroy,
 	          &(fb_Reg){ "destroy", m_app_destroy, 0, 0, FB_RET_BOOL, 0,
 	                     "tear down swapchain/device/instance/window; call last", NULL, 0, NULL, NULL, NULL });
@@ -1328,8 +1355,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 69 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    80 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 70 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    81 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -1834,7 +1861,7 @@ int fbuild_open(fb_State *S) {
  * [x] vkGetPhysicalDeviceFeatures
  * [ ] vkGetPhysicalDeviceFeatures2
  * [ ] vkGetPhysicalDeviceFeatures2KHR
- * [ ] vkGetPhysicalDeviceFormatProperties
+ * [x] vkGetPhysicalDeviceFormatProperties
  * [ ] vkGetPhysicalDeviceFormatProperties2
  * [ ] vkGetPhysicalDeviceFormatProperties2KHR
  * [ ] vkGetPhysicalDeviceFragmentShadingRatesKHR
@@ -3095,7 +3122,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkFormatFeatureFlags
  * [ ] VkFormatFeatureFlags2
  * [ ] VkFormatFeatureFlags2KHR
- * [ ] VkFormatProperties
+ * [x] VkFormatProperties
  * [ ] VkFormatProperties2
  * [ ] VkFormatProperties2KHR
  * [ ] VkFormatProperties3
