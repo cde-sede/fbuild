@@ -103,6 +103,7 @@
 	X(vkCmdDraw) \
 	X(vkCmdDrawIndexed) \
 	X(vkCmdFillBuffer) \
+	X(vkCmdCopyBuffer) \
 	X(vkCreateSemaphore) \
 	X(vkDestroySemaphore) \
 	X(vkCreateFence) \
@@ -874,6 +875,7 @@ static fb_Value bi_buffer(fb_State *S, fb_Value *a, int n) {
 	else if (strcmp(usage_s, "uniform") == 0) usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
 	else return fb_error(S, "vk: buffer usage must be \"vertex\", \"index\", or \"uniform\", got \"%s\"", usage_s);
 	usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT; /* lets .fill() (vkCmdFillBuffer) target it */
+	usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT; /* lets .copy_to() (vkCmdCopyBuffer) read it */
 
 	int len = fb_len(list);
 	size_t elem_size = is_index ? sizeof(uint32_t) : sizeof(float);
@@ -973,6 +975,48 @@ static fb_Value m_buf_fill(fb_State *S, fb_Value *a, int n) {
 	if (r == VK_SUCCESS) r = app->fn.vkQueueWaitIdle(app->queue);
 	app->fn.vkFreeCommandBuffers(app->dev, app->cmdpool, 1, &cb);
 	if (r != VK_SUCCESS) return fb_error(S, "vk: fill submit/wait failed (%d)", (int)r);
+	return a[0];
+}
+
+/* .copy_to(dst) -> self. GPU-side copy of this buffer's data into `dst`
+ * (vkCmdCopyBuffer), min(this.size, dst.size) bytes starting at offset 0 in
+ * both; recorded/submitted/waited the same one-shot way as .fill(), so also
+ * works outside begin_frame/end_frame. Every buffer built by .buffer() sets
+ * both TRANSFER_SRC_BIT and TRANSFER_DST_BIT, so any Buffer can be either
+ * side of a copy_to(). */
+static fb_Value m_buf_copy_to(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkbuf_t *src = fb_object_data(a[0]);
+	vkbuf_t *dst = fb_object_data(a[1]);
+	vkapp_t *app = src->app;
+	VkDeviceSize size = src->size < dst->size ? src->size : dst->size;
+
+	VkCommandBufferAllocateInfo cbai = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		.commandPool = app->cmdpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+		.commandBufferCount = 1,
+	};
+	VkCommandBuffer cb;
+	VkResult r = app->fn.vkAllocateCommandBuffers(app->dev, &cbai, &cb);
+	if (r != VK_SUCCESS) return fb_error(S, "vk: vkAllocateCommandBuffers failed (%d)", (int)r);
+
+	VkCommandBufferBeginInfo bi = {
+		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+	};
+	app->fn.vkBeginCommandBuffer(cb, &bi);
+	VkBufferCopy region = { .srcOffset = 0, .dstOffset = 0, .size = size };
+	app->fn.vkCmdCopyBuffer(cb, src->buf, dst->buf, 1, &region);
+	app->fn.vkEndCommandBuffer(cb);
+
+	VkSubmitInfo si = {
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		.commandBufferCount = 1, .pCommandBuffers = &cb,
+	};
+	r = app->fn.vkQueueSubmit(app->queue, 1, &si, VK_NULL_HANDLE);
+	if (r == VK_SUCCESS) r = app->fn.vkQueueWaitIdle(app->queue);
+	app->fn.vkFreeCommandBuffers(app->dev, app->cmdpool, 1, &cb);
+	if (r != VK_SUCCESS) return fb_error(S, "vk: copy_to submit/wait failed (%d)", (int)r);
 	return a[0];
 }
 
@@ -1354,6 +1398,13 @@ int fbuild_open(fb_State *S) {
 	                     "GPU-side fill of the whole buffer with a repeating 32-bit word "
 	                     "(vkCmdFillBuffer); chainable, no host memory involved",
 	                     fill_params, 1, "Buffer", NULL, NULL });
+	static const fb_Ret copy_to_params[] = { FB_RET_ANY };
+	fb_method(S, BUFFER_CLS, "copy_to", m_buf_copy_to,
+	          &(fb_Reg){ "copy_to", m_buf_copy_to, 1, 1, FB_RET_ANY, 0,
+	                     "GPU-side copy of this buffer's data into dst (vkCmdCopyBuffer), "
+	                     "min(size, dst.size) bytes; chainable, no host memory involved",
+	                     copy_to_params, 1, "Buffer", NULL, NULL });
+	fb_reg_param_class("Buffer.copy_to", 0, "Buffer");
 	fb_method(S, BUFFER_CLS, "destroy", m_buf_destroy,
 	          &(fb_Reg){ "destroy", m_buf_destroy, 0, 0, FB_RET_BOOL, 0, "free GPU memory", NULL, 0, NULL, NULL, NULL });
 	fb_class_field(S, BUFFER_CLS, "size", FB_RET_INT, NULL);
@@ -1404,8 +1455,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 71 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    83 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 72 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    84 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -1478,7 +1529,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkCmdCopyAccelerationStructureKHR
  * [ ] vkCmdCopyAccelerationStructureNV
  * [ ] vkCmdCopyAccelerationStructureToMemoryKHR
- * [ ] vkCmdCopyBuffer
+ * [x] vkCmdCopyBuffer
  * [ ] vkCmdCopyBuffer2
  * [ ] vkCmdCopyBuffer2KHR
  * [ ] vkCmdCopyBufferToImage
@@ -2104,7 +2155,7 @@ int fbuild_open(fb_State *S) {
  * [ ] PFN_vkCmdCopyAccelerationStructureKHR
  * [ ] PFN_vkCmdCopyAccelerationStructureNV
  * [ ] PFN_vkCmdCopyAccelerationStructureToMemoryKHR
- * [ ] PFN_vkCmdCopyBuffer
+ * [x] PFN_vkCmdCopyBuffer
  * [ ] PFN_vkCmdCopyBuffer2
  * [ ] PFN_vkCmdCopyBuffer2KHR
  * [ ] PFN_vkCmdCopyBufferToImage
@@ -2777,7 +2828,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkBorderColor
  * [x] VkBuffer
  * [ ] VkBufferCaptureDescriptorDataInfoEXT
- * [ ] VkBufferCopy
+ * [x] VkBufferCopy
  * [ ] VkBufferCopy2
  * [ ] VkBufferCopy2KHR
  * [ ] VkBufferCreateFlagBits
