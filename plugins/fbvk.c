@@ -126,7 +126,8 @@
 	X(vkMapMemory) \
 	X(vkUnmapMemory) \
 	X(vkEnumerateInstanceVersion) \
-	X(vkEnumerateInstanceLayerProperties)
+	X(vkEnumerateInstanceLayerProperties) \
+	X(vkGetRenderAreaGranularity)
 
 typedef struct {
 #define X(n) PFN_##n n;
@@ -1193,6 +1194,21 @@ static fb_Value m_vertex_format_supported(fb_State *S, fb_Value *a, int n) {
 	return fb_bool(S, (props.bufferFeatures & VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT) != 0);
 }
 
+/* .render_area_granularity() -> Map{width, height}. the render pass's
+ * optimal tile granularity (vkGetRenderAreaGranularity): a begin_frame render
+ * area whose offset/extent are multiples of this wastes no bandwidth on
+ * partially-covered tiles at the edges. Pure introspection, no GPU work. */
+static fb_Value m_render_area_granularity(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkapp_t *app = fb_object_data(a[0]);
+	VkExtent2D g;
+	app->fn.vkGetRenderAreaGranularity(app->dev, app->renderpass, &g);
+	fb_Value m = fb_map(S);
+	fb_set(S, m, "width", fb_int(S, (long)g.width));
+	fb_set(S, m, "height", fb_int(S, (long)g.height));
+	return m;
+}
+
 /* .pipeline(vert, frag, layout[, opts]) -> Pipeline. `layout` is a list of
  * per-attribute float component counts, e.g. List<3,3> = a tightly packed
  * vec3 position + vec3 color per vertex (one binding, one buffer). */
@@ -1419,6 +1435,10 @@ int fbuild_open(fb_State *S) {
 	                     "true if this device supports a comps-float (1..4) vertex attribute format, "
 	                     "the same VkFormat pipeline()'s layout list would pick for that comps value",
 	                     vfmt_params, 1, NULL, NULL, NULL });
+	fb_method(S, APP_CLS, "render_area_granularity", m_render_area_granularity,
+	          &(fb_Reg){ "render_area_granularity", m_render_area_granularity, 0, 0, FB_RET_MAP, 0,
+	                     "optimal render-area tile granularity {width, height} for this app's render pass",
+	                     NULL, 0, NULL, NULL, NULL });
 	fb_method(S, APP_CLS, "destroy", m_app_destroy,
 	          &(fb_Reg){ "destroy", m_app_destroy, 0, 0, FB_RET_BOOL, 0,
 	                     "tear down swapchain/device/instance/window; call last", NULL, 0, NULL, NULL, NULL });
@@ -1499,7 +1519,7 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 74 / 623 wrapped (dlsym'd + called somewhere above).
+ * Commands: 75 / 623 wrapped (dlsym'd + called somewhere above).
  * Types:    87 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
@@ -2058,7 +2078,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkGetRayTracingShaderGroupHandlesNV
  * [ ] vkGetRayTracingShaderGroupStackSizeKHR
  * [ ] vkGetRefreshCycleDurationGOOGLE
- * [ ] vkGetRenderAreaGranularity
+ * [x] vkGetRenderAreaGranularity
  * [ ] vkGetRenderingAreaGranularityKHR
  * [ ] vkGetSamplerOpaqueCaptureDescriptorDataEXT
  * [ ] vkGetSemaphoreCounterValue
@@ -2689,7 +2709,7 @@ int fbuild_open(fb_State *S) {
  * [ ] PFN_vkGetRayTracingShaderGroupHandlesNV
  * [ ] PFN_vkGetRayTracingShaderGroupStackSizeKHR
  * [ ] PFN_vkGetRefreshCycleDurationGOOGLE
- * [ ] PFN_vkGetRenderAreaGranularity
+ * [x] PFN_vkGetRenderAreaGranularity
  * [ ] PFN_vkGetRenderingAreaGranularityKHR
  * [ ] PFN_vkGetSamplerOpaqueCaptureDescriptorDataEXT
  * [ ] PFN_vkGetSemaphoreCounterValue
