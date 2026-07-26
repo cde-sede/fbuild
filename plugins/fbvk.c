@@ -126,6 +126,7 @@
 	X(vkBindBufferMemory) \
 	X(vkMapMemory) \
 	X(vkUnmapMemory) \
+	X(vkInvalidateMappedMemoryRanges) \
 	X(vkEnumerateInstanceVersion) \
 	X(vkEnumerateInstanceLayerProperties) \
 	X(vkGetRenderAreaGranularity) \
@@ -1080,6 +1081,25 @@ static fb_Value m_buf_copy_to(fb_State *S, fb_Value *a, int n) {
 	return a[0];
 }
 
+/* .invalidate() -> self. Host-side counterpart to a GPU-side flush: makes
+ * writes the GPU made into this buffer's mapped memory visible to
+ * subsequent host reads (vkInvalidateMappedMemoryRanges). Every buffer here
+ * is allocated HOST_COHERENT, so this is a no-op on real Vulkan
+ * implementations today -- exposed anyway as the standard/correct call a
+ * script should be able to make explicitly before reading back buffer
+ * contents the GPU wrote (e.g. after a compute/copy op). */
+static fb_Value m_buf_invalidate(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkbuf_t *b = fb_object_data(a[0]);
+	VkMappedMemoryRange range = {
+		.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+		.memory = b->mem, .offset = 0, .size = VK_WHOLE_SIZE,
+	};
+	VkResult r = b->app->fn.vkInvalidateMappedMemoryRanges(b->app->dev, 1, &range);
+	if (r != VK_SUCCESS) return fb_error(S, "vk: vkInvalidateMappedMemoryRanges failed (%d)", (int)r);
+	return a[0];
+}
+
 static fb_Value m_buf_destroy(fb_State *S, fb_Value *a, int n) {
 	(void)n;
 	vkbuf_t *b = fb_object_data(a[0]);
@@ -1534,6 +1554,12 @@ int fbuild_open(fb_State *S) {
 	                     "min(size, dst.size) bytes; chainable, no host memory involved",
 	                     copy_to_params, 1, "Buffer", NULL, NULL });
 	fb_reg_param_class("Buffer.copy_to", 0, "Buffer");
+	fb_method(S, BUFFER_CLS, "invalidate", m_buf_invalidate,
+	          &(fb_Reg){ "invalidate", m_buf_invalidate, 0, 0, FB_RET_ANY, 0,
+	                     "make GPU writes into this buffer's mapped memory visible to "
+	                     "subsequent host reads (vkInvalidateMappedMemoryRanges); chainable, "
+	                     "no-op on our HOST_COHERENT buffers but the correct call to make",
+	                     NULL, 0, "Buffer", NULL, NULL });
 	fb_method(S, BUFFER_CLS, "destroy", m_buf_destroy,
 	          &(fb_Reg){ "destroy", m_buf_destroy, 0, 0, FB_RET_BOOL, 0, "free GPU memory", NULL, 0, NULL, NULL, NULL });
 	fb_class_field(S, BUFFER_CLS, "size", FB_RET_INT, NULL);
@@ -1592,8 +1618,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 78 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    93 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 79 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    94 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -2169,7 +2195,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkImportFenceFdKHR
  * [ ] vkImportSemaphoreFdKHR
  * [ ] vkInitializePerformanceApiINTEL
- * [ ] vkInvalidateMappedMemoryRanges
+ * [x] vkInvalidateMappedMemoryRanges
  * [ ] vkLatencySleepNV
  * [x] vkMapMemory
  * [ ] vkMapMemory2KHR
@@ -3513,7 +3539,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkLayerSettingTypeEXT
  * [ ] VkLineRasterizationModeEXT
  * [ ] VkLogicOp
- * [ ] VkMappedMemoryRange
+ * [x] VkMappedMemoryRange
  * [ ] VkMemoryAllocateFlagBits
  * [ ] VkMemoryAllocateFlagBitsKHR
  * [ ] VkMemoryAllocateFlags
