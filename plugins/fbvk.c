@@ -92,6 +92,7 @@
 	X(vkFreeCommandBuffers) \
 	X(vkResetCommandBuffer) \
 	X(vkResetCommandPool) \
+	X(vkTrimCommandPool) \
 	X(vkBeginCommandBuffer) \
 	X(vkEndCommandBuffer) \
 	X(vkCmdBeginRenderPass) \
@@ -767,6 +768,18 @@ static fb_Value m_reset_command_pool(fb_State *S, fb_Value *a, int n) {
 	return fb_bool(S, 1);
 }
 
+/* .trim_command_pool() -> Bool. releases unused memory back from this app's
+ * command pool to the system -- a maintenance operation, worth calling after
+ * resetting/freeing many command buffers to actually give the memory back
+ * (reset_command_pool alone keeps it reserved for reuse). Always "succeeds"
+ * (void Vulkan call) as long as the handles are valid. */
+static fb_Value m_trim_command_pool(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkapp_t *app = fb_object_data(a[0]);
+	app->fn.vkTrimCommandPool(app->dev, app->cmdpool, 0);
+	return fb_bool(S, 1);
+}
+
 /* .frame_ready() -> Bool. non-blocking poll of the current frame slot's
  * in-flight fence -- true once the GPU has finished the last submission that
  * used this slot (the same fence begin_frame would otherwise block on),
@@ -1384,6 +1397,10 @@ int fbuild_open(fb_State *S) {
 	          &(fb_Reg){ "reset_command_pool", m_reset_command_pool, 0, 0, FB_RET_BOOL, 0,
 	                     "reset every command buffer allocated from this app's command pool at once",
 	                     NULL, 0, NULL, NULL, NULL });
+	fb_method(S, APP_CLS, "trim_command_pool", m_trim_command_pool,
+	          &(fb_Reg){ "trim_command_pool", m_trim_command_pool, 0, 0, FB_RET_BOOL, 0,
+	                     "release unused memory back from this app's command pool to the system",
+	                     NULL, 0, NULL, NULL, NULL });
 	fb_method(S, APP_CLS, "frame_ready", m_frame_ready,
 	          &(fb_Reg){ "frame_ready", m_frame_ready, 0, 0, FB_RET_BOOL, 0,
 	                     "non-blocking check: has the GPU finished the current frame slot's last submission",
@@ -1519,7 +1536,7 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 75 / 623 wrapped (dlsym'd + called somewhere above).
+ * Commands: 76 / 623 wrapped (dlsym'd + called somewhere above).
  * Types:    87 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
@@ -2140,7 +2157,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkSignalSemaphoreKHR
  * [ ] vkSubmitDebugUtilsMessageEXT
  * [ ] vkTransitionImageLayoutEXT
- * [ ] vkTrimCommandPool
+ * [x] vkTrimCommandPool
  * [ ] vkTrimCommandPoolKHR
  * [ ] vkUninitializePerformanceApiINTEL
  * [x] vkUnmapMemory
