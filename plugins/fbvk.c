@@ -128,7 +128,9 @@
 	X(vkUnmapMemory) \
 	X(vkEnumerateInstanceVersion) \
 	X(vkEnumerateInstanceLayerProperties) \
-	X(vkGetRenderAreaGranularity)
+	X(vkGetRenderAreaGranularity) \
+	X(vkCreateSampler) \
+	X(vkDestroySampler)
 
 typedef struct {
 #define X(n) PFN_##n n;
@@ -229,7 +231,7 @@ static int ensure_loader(fb_State *S) {
 }
 
 /* ---- classes ------------------------------------------------------------ */
-static fb_Class VK_CLS, DEVICE_CLS, APP_CLS, BUFFER_CLS, SHADER_CLS, PIPELINE_CLS;
+static fb_Class VK_CLS, DEVICE_CLS, APP_CLS, BUFFER_CLS, SHADER_CLS, PIPELINE_CLS, SAMPLER_CLS;
 
 #define MAX_FRAMES_IN_FLIGHT 2
 
@@ -285,6 +287,11 @@ typedef struct {
 	VkPipeline        pipeline;
 	VkPipelineLayout  layout;
 } vkpipe_t;
+
+typedef struct {
+	vkapp_t   *app;
+	VkSampler  h;
+} vksampler_t;
 
 #define P(v) fb_tostr(S, (v))
 
@@ -1187,6 +1194,46 @@ static fb_Value m_shader_destroy(fb_State *S, fb_Value *a, int n) {
 	return fb_bool(S, 1);
 }
 
+/* .sampler() -> Sampler. Fixed-defaults image sampler: bilinear filtering,
+ * repeat addressing, no anisotropy (so no feature-enable dance needed). Not
+ * usable in a full texturing pipeline yet -- no Image/descriptor-set support
+ * in this plugin -- but the resource itself is fully valid to create/destroy
+ * standalone. */
+static fb_Value bi_sampler(fb_State *S, fb_Value *a, int n) {
+	(void)n;
+	vkapp_t *app = fb_object_data(a[0]);
+
+	VkSamplerCreateInfo ci = {
+		.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+		.magFilter = VK_FILTER_LINEAR,
+		.minFilter = VK_FILTER_LINEAR,
+		.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+		.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+		.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+		.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+		.anisotropyEnable = VK_FALSE,
+		.maxAnisotropy = 1.0f,
+		.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+		.compareEnable = VK_FALSE,
+		.compareOp = VK_COMPARE_OP_ALWAYS,
+		.unnormalizedCoordinates = VK_FALSE,
+	};
+	VkSampler h;
+	VkResult r = app->fn.vkCreateSampler(app->dev, &ci, NULL, &h);
+	if (r != VK_SUCCESS) return fb_error(S, "vk: vkCreateSampler failed (%d)", (int)r);
+
+	vksampler_t *s = calloc(1, sizeof *s);
+	s->app = app; s->h = h;
+	return fb_object(S, SAMPLER_CLS, s);
+}
+
+static fb_Value m_sampler_destroy(fb_State *S, fb_Value *a, int n) {
+	(void)S; (void)n;
+	vksampler_t *s = fb_object_data(a[0]);
+	if (s->h) { s->app->fn.vkDestroySampler(s->app->dev, s->h, NULL); s->h = VK_NULL_HANDLE; }
+	return fb_bool(S, 1);
+}
+
 /* .vertex_format_supported(comps) -> Bool. `comps` is a per-attribute float
  * component count (1..4), exactly what pipeline()'s `layout` list elements
  * are -- this checks whether the VkFormat that comps maps to there
@@ -1382,6 +1429,7 @@ int fbuild_open(fb_State *S) {
 	BUFFER_CLS   = fb_class(S, "Buffer");
 	SHADER_CLS   = fb_class(S, "Shader");
 	PIPELINE_CLS = fb_class(S, "Pipeline");
+	SAMPLER_CLS  = fb_class(S, "Sampler");
 
 	static const fb_Ret NUM4[] = { FB_RET_NUM, FB_RET_NUM, FB_RET_NUM, FB_RET_NUM };
 	fb_method(S, APP_CLS, "should_close", m_should_close,
@@ -1438,6 +1486,11 @@ int fbuild_open(fb_State *S) {
 	          &(fb_Reg){ "shader", bi_shader, 2, 3, FB_RET_ANY, 0,
 	                     "GLSL source/path (compiled via `glslc`) or a .spv path; stage: "
 	                     "\"vertex\"|\"fragment\"|\"compute\"", shader_params, 2, "Shader", NULL, NULL });
+	fb_method(S, APP_CLS, "sampler", bi_sampler,
+	          &(fb_Reg){ "sampler", bi_sampler, 0, 0, FB_RET_ANY, 0,
+	                     "image sampler with fixed sane defaults (bilinear, repeat, no anisotropy); "
+	                     "not usable in a texturing pipeline yet -- no Image/descriptor-set support here",
+	                     NULL, 0, "Sampler", NULL, NULL });
 	static const fb_Ret pipe_types[] = { FB_RET_ANY, FB_RET_ANY, FB_RET_LIST, FB_RET_MAP };
 	fb_method(S, APP_CLS, "pipeline", bi_pipeline,
 	          &(fb_Reg){ "pipeline", bi_pipeline, 3, 4, FB_RET_ANY, 0,
@@ -1494,6 +1547,9 @@ int fbuild_open(fb_State *S) {
 	fb_method(S, PIPELINE_CLS, "destroy", m_pipeline_destroy,
 	          &(fb_Reg){ "destroy", m_pipeline_destroy, 0, 0, FB_RET_BOOL, 0, "destroy pipeline + its layout", NULL, 0, NULL, NULL, NULL });
 
+	fb_method(S, SAMPLER_CLS, "destroy", m_sampler_destroy,
+	          &(fb_Reg){ "destroy", m_sampler_destroy, 0, 0, FB_RET_BOOL, 0, "destroy the sampler", NULL, 0, NULL, NULL, NULL });
+
 	static const fb_Ret app_params[] = { FB_RET_STR, FB_RET_INT, FB_RET_INT, FB_RET_MAP };
 	fb_method(S, VK_CLS, "app", bi_app,
 	          &(fb_Reg){ "app", bi_app, 3, 4, FB_RET_ANY, 0,
@@ -1536,8 +1592,8 @@ int fbuild_open(fb_State *S) {
  *   (types: struct/union/enum `} VkXxx;` + VK_DEFINE_(NON_DISPATCHABLE_)HANDLE
  *    + `typedef VkFlags(64) VkXxx;` + `PFN_vkXxx` + single-line aliases)
  *
- * Commands: 76 / 623 wrapped (dlsym'd + called somewhere above).
- * Types:    87 / 2301 referenced (structs/enums/handles/flags/funcptrs
+ * Commands: 78 / 623 wrapped (dlsym'd + called somewhere above).
+ * Types:    93 / 2301 referenced (structs/enums/handles/flags/funcptrs
  *           this plugin names directly; excludes extension-only types this
  *           file never spells even if functionally implied).
  *
@@ -1866,7 +1922,7 @@ int fbuild_open(fb_State *S) {
  * [x] vkCreateRenderPass
  * [ ] vkCreateRenderPass2
  * [ ] vkCreateRenderPass2KHR
- * [ ] vkCreateSampler
+ * [x] vkCreateSampler
  * [ ] vkCreateSamplerYcbcrConversion
  * [ ] vkCreateSamplerYcbcrConversionKHR
  * [x] vkCreateSemaphore
@@ -1914,7 +1970,7 @@ int fbuild_open(fb_State *S) {
  * [ ] vkDestroyPrivateDataSlotEXT
  * [ ] vkDestroyQueryPool
  * [x] vkDestroyRenderPass
- * [ ] vkDestroySampler
+ * [x] vkDestroySampler
  * [ ] vkDestroySamplerYcbcrConversion
  * [ ] vkDestroySamplerYcbcrConversionKHR
  * [x] vkDestroySemaphore
@@ -2906,7 +2962,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkBlitImageInfo2KHR
  * [ ] VkBlockMatchWindowCompareModeQCOM
  * [x] VkBool32
- * [ ] VkBorderColor
+ * [x] VkBorderColor
  * [x] VkBuffer
  * [ ] VkBufferCaptureDescriptorDataInfoEXT
  * [x] VkBufferCopy
@@ -3292,7 +3348,7 @@ int fbuild_open(fb_State *S) {
  * [ ] VkFenceImportFlagBitsKHR
  * [ ] VkFenceImportFlags
  * [ ] VkFenceImportFlagsKHR
- * [ ] VkFilter
+ * [x] VkFilter
  * [ ] VkFilterCubicImageViewImageFormatPropertiesEXT
  * [ ] VkFlags
  * [ ] VkFlags64
@@ -4144,17 +4200,17 @@ int fbuild_open(fb_State *S) {
  * [ ] VkSampleLocationEXT
  * [ ] VkSampleLocationsInfoEXT
  * [ ] VkSampleMask
- * [ ] VkSampler
- * [ ] VkSamplerAddressMode
+ * [x] VkSampler
+ * [x] VkSamplerAddressMode
  * [ ] VkSamplerBlockMatchWindowCreateInfoQCOM
  * [ ] VkSamplerBorderColorComponentMappingCreateInfoEXT
  * [ ] VkSamplerCaptureDescriptorDataInfoEXT
  * [ ] VkSamplerCreateFlagBits
  * [ ] VkSamplerCreateFlags
- * [ ] VkSamplerCreateInfo
+ * [x] VkSamplerCreateInfo
  * [ ] VkSamplerCubicWeightsCreateInfoQCOM
  * [ ] VkSamplerCustomBorderColorCreateInfoEXT
- * [ ] VkSamplerMipmapMode
+ * [x] VkSamplerMipmapMode
  * [ ] VkSamplerReductionMode
  * [ ] VkSamplerReductionModeCreateInfo
  * [ ] VkSamplerReductionModeCreateInfoEXT
