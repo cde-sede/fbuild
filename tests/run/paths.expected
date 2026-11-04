@@ -1,0 +1,6 @@
+ .bashrc  / a b
+/b a/b a/b.o x/z
+a .gz x.tar
+[paths/a.c, paths/sub/b.c] [paths/a.c] [paths/sub/.hid/c.c] true
+a/b.o
+exit 0

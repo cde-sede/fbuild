@@ -1,83 +1,197 @@
-# Self-build: funcbuild building its own interpreter.
-# Compiles src/*.c -> build/*.o in parallel, links fbuild, writes
-# compile_commands.json. nob bootstraps the first binary; after that
-#   ./fbuild                  # rebuild (default target)
-#   ./fbuild -f               # force a full rebuild
-#   ./fbuild --compile-commands
-#   ./fbuild plugins          # build plugins/*.c -> build/*.so
-#   ./fbuild fbuildd          # build the LSP daemon (opt-in, like plugins)
-#   ./fbuild install
-#   ./fbuild --help           # generated from the schema below
+# Builds fbuild without make: ca compiled from source (ca-lib/, the submodule, else ../ca-lib:
+# src/lib into libca.a, src/runtime into libca_runtime.a, under this build's directory), fbuild
+# itself, the language server fbuildd, and the plugins (plugins/*.cpp). Same layout as the
+# Makefile: build/<cxx>-<mode>/fbuild, fbuildd, plugins/, test-plugins/.
+#
+#   fbuild              debug build with clang++: build/clang++-debug/fbuild
+#   fbuild -r           release build (-O2, NDEBUG): build/clang++-release
+#   fbuild -x g++       another compiler: build/g++-<mode>
+#   fbuild -l           link against libc instead of ca's runtime (static-pie, no libc)
+#   fbuild -t           then build the test plugins and run tests/run.sh
+#   fbuild -c           also write compile_commands.json
+#   fbuild -i           then install fbuild and fbuildd to /usr/bin (through sudo unless root)
+#   fbuild --ca DIR     ca-lib somewhere else than ca-lib/ or ../ca-lib
+#
+# The binary building itself can rebuild itself: the linker writes a new file, the running one
+# is unaffected.
+
 opts = Parser<{
-	"force":    { "type": "bool", "help": "force a full rebuild" },
-	"commands": { "type": "bool", "long": "--compile-commands", "help": "write compile_commands.json" },
-	"jobs":     { "type": "int", "short": "-j", "default": _ -> to_int(shell(`nproc`)), "help": "parallel compile jobs (-j N, default nproc)" },
-	"bench":    { "type": "bool", "help": "print build timing (needs --bench)" },
-	"quiet":    { "type": "bool", "short": "-q", "help": "quiet mode" },
+	release:  {short: "-r", long: "--release", help: "optimized build (-O2, NDEBUG)", type: "bool"},
+	force:    {short: "-f", long: "--force", help: "rebuild everything", type: "bool"},
+	jobs:     {short: "-j", long: "--jobs", help: "parallel jobs (default nproc)", type: "int", default: _ -> to_int(shell(`nproc`))},
+	cxx:      {short: "-x", long: "--cxx", help: "C++ compiler (default clang++)", type: "str", default: "clang++"},
+	libc:     {short: "-l", long: "--libc", help: "link against libc instead of ca's runtime", type: "bool"},
+	tests:    {short: "-t", long: "--tests", help: "build the test plugins, then run tests/run.sh", type: "bool"},
+	commands: {short: "-c", long: "--compile-commands", help: "write compile_commands.json", type: "bool"},
+	install:  {short: "-i", long: "--install", help: "install fbuild and fbuildd to /usr/bin", type: "bool"},
+	quiet:    {short: "-q", long: "--quiet", help: "no live output", type: "bool"},
+	ca:       {long: "--ca", help: "the ca-lib checkout (default ca-lib/, else ../ca-lib)", type: "str",
+	           default: _ -> "ca-lib" when exists(path("ca-lib/src/lib")) else "../ca-lib"},
 }>
 
-config({ "jobs": opts.jobs, "silent": opts.quiet })
-FORCE    = opts.force
-COMMANDS = opts.commands
-TARGETS  = opts.rest
+config({ jobs: opts.jobs, silent: opts.quiet })
+
+FORCE = opts.force
+CXX   = opts.cxx
+CA    = opts.ca
+MODE  = "release" when opts.release else "debug"
+OUT   = "build/{name(path(CXX))}-{MODE}"
+# Only core builtins: the script must run on an fbuild with no plugins loaded (it builds them),
+# and the type checker rejects a plugin call there as an unknown function.
+CLANG = length(split(CXX, "clang")) > 1
+
+assert(exists(path("{CA}/src/lib")), "no ca-lib checkout at {CA} (point --ca at one)")
+assert(to_str(which(CXX)) != "", "{CXX} is not in PATH (pick a compiler with -x)")
+
+# A command word mixing text and {x} splits in two: words like -I<dir> and K=V are built whole,
+# as strings.
+kv = (k, v) -> "{k}={v}"
+
+# ca's flags (its Makefile), which fbuild and the plugins share. Debug keeps frame pointers, for
+# full trap backtraces; -O1 because ca's compile-time check of unchecked accesses needs the
+# optimizer.
+STD        = "c++2c" when CLANG else "c++23"
+MODE_FLAGS = List<"-O2", "-DNDEBUG"> when opts.release
+	else List<"-g", "-O1", "-fno-omit-frame-pointer", "-mno-omit-leaf-frame-pointer">
+CXXFLAGS   = concat(List<
+	"-std={STD}", "-nostdinc++", "-fno-exceptions", "-fno-rtti",
+	"-Wall", "-Wextra", "-Wpedantic", "-Werror", "-pthread", "-MMD", "-MP"
+>, MODE_FLAGS)
+
+CA_LIB       = "{CA}/src/lib"
+CA_RUNTIME   = "{CA}/src/runtime"
+CA_FLAGS     = concat(List<"-I{CA_LIB}">, CXXFLAGS)
+FB_FLAGS     = concat(List<"-Isrc", "-I{CA_LIB}">, CXXFLAGS)
+PLUGIN_FLAGS = concat(FB_FLAGS, List<"-fPIC", "-shared", "-nostdlib", "-fno-stack-protector">)
+
+LIBCA   = path("{OUT}/ca/libca.a")
+RUNTIME = path("{OUT}/ca/libca_runtime.a")
+
+# All of libca.a is linked in (--whole-archive), so a plugin can call any ca function, not only
+# those fbuild itself uses. Without libc: a static-pie on ca's runtime (_start, its own syscalls).
+WHOLE_CA = List<"-Wl,--whole-archive", to_str(LIBCA), "-Wl,--no-whole-archive">
+LINK     = "libc" when opts.libc else "free"
+LDFLAGS  = concat(List<"-nostdinc++", "-pthread">, List<"-nostdlib++"> when CLANG else List<>) when opts.libc
+	else List<"-nostdlib", "-static-pie", "-Wl,-u,_start">
+LIBS     = WHOLE_CA when opts.libc else concat(WHOLE_CA, List<to_str(RUNTIME), "-lgcc">)
 
 
-EXE    = [fbuild]
-SRCS   = filter(glob([src/*.c]), f -> name(f) != 'main_lspd.c')
-OBJS   = SRCS |> f -> path([build], cat(stem(f), '.o'))
-HDRS   = concat(glob([src/*.h]), glob([cds-lib/cds_lib/*.h]), glob([cds-lib/*.h]), glob([cds-lib/*.c]))
-CC     = 'gcc'
-CFLAGS = '-ggdb', '-Icds-lib', '-Wall', '-Wextra', '-Werror', '-O2', '-U_FORTIFY_SOURCE', '-D_FORTIFY_SOURCE=0'
-log    = l, m -> print(cat('[', l, '] ', m))
+# -- SOURCES ------------------------------------------------------------------
 
-compile = o, s -> `{CC} {...CFLAGS} -c {...s} -o {.o}`
-                  when FORCE or stale(.o, ...s, ...HDRS)
-link    = a, d -> `{CC} {...d} -o {.a} -rdynamic -ldl -lm` when FORCE or stale(.a, ...d)
+lines = s -> filter(split(s, "\n"), x -> x != "")
 
-create_cmd = (f, artifact, @deps -> f(.artifact, ...deps))
+CA_SRC          = lines(shell(`find {CA_LIB} -name *.cpp`)) |> s -> path(s)
+RUNTIME_SRC     = lines(shell(`find {CA_RUNTIME} -name *.cpp`)) |> s -> path(s)
+FB_SRC          = lines(shell(`find src -name *.cpp`)) |> s -> path(s)
+PLUGIN_SRC      = glob([plugins/*.cpp])
+TEST_PLUGIN_SRC = glob([tests/plugins/*.cpp])
 
-units = zip(OBJS, SRCS)
-objs  = units |> @u -> create_cmd(compile, ...u)
-exe   = create_cmd(link, EXE, OBJS)
+# s below prefix, as root/<the rest>.o under OUT.
+object = (root, prefix, s) -> with_suffix(path(cat(OUT, "/", root, "/", last(split(to_str(s), prefix)))), ".o")
 
-PLUGIN_SRCS = glob([plugins/*.c])
-PLUGINS     = PLUGIN_SRCS |> f -> path([build], cat(stem(f), '.so'))
-plugin_cc   = o, s -> `{CC} -shared -fPIC -Isrc {...CFLAGS} {...s} -o {.o}`
-                      when FORCE or stale(.o, ...s, [src/fbuild.h])
-plugins     = zip(PLUGINS, PLUGIN_SRCS) |> @u -> create_cmd(plugin_cc, ...u)
+# label: what the build display shows for the unit's command (its source, short).
+unit    = (s, o, label, cmd) -> { src: s, obj: o, label: label, cmd: cmd }
+ca_unit = (root, prefix, s) -> unit(s, o, cat(root, "/", last(split(to_str(s), prefix))), `{CXX} {...CA_FLAGS} -c {s} -o {o}`)
+	where o = object(root, prefix, s)
+fb_unit = s -> unit(s, o, to_str(s), `{CXX} {...FB_FLAGS} -c {s} -o {o}`) where o = object("obj", "src/", s)
+# A plugin compiles and links in one step; -MMD writes NAME.d next to NAME.so.
+plugin_unit = (dir, s) -> unit(s, o, name(o), `{CXX} {...PLUGIN_FLAGS} {s} -o {o}`) where o = path("{OUT}/{dir}/{stem(s)}.so")
 
-mkdir([build])
-log("INFO", "Compile commands done!"), json_write([compile_commands.json],
-	concat(
-		units |> (o, s) -> { directory: cwd,
-			file: s,
-			command: "{CC} {CFLAGS} -c {s} -o {o}"
-		},
-		zip(PLUGINS, PLUGIN_SRCS) |> (o, s) -> { directory: cwd,
-			file: s,
-			command: "{CC} -shared -fPIC -Isrc {CFLAGS} {s} -o {o}"
-		}
-	)
-) when COMMANDS
+CA_UNITS          = CA_SRC |> s -> ca_unit("ca/lib", "{CA_LIB}/", s)
+RUNTIME_UNITS     = RUNTIME_SRC |> s -> ca_unit("ca/runtime", "{CA_RUNTIME}/", s)
+FB_UNITS          = FB_SRC |> s -> fb_unit(s)
+PLUGIN_UNITS      = PLUGIN_SRC |> s -> plugin_unit("plugins", s)
+# The plugins tests/plugins.sh loads to check load errors: kept out of plugins/, so that
+# FBUILD_PLUGIN_PATH pointed at it loads only working plugins.
+TEST_PLUGIN_UNITS = (TEST_PLUGIN_SRC |> s -> plugin_unit("test-plugins", s)) when opts.tests else List<>
+UNITS             = concat(CA_UNITS, RUNTIME_UNITS, FB_UNITS, PLUGIN_UNITS, TEST_PLUGIN_UNITS)
 
-(run(plugins), log("INFO", "plugins built")) when contains(TARGETS, 'plugins')
-
-EXED     = [fbuildd]
-LSPD_SRC = [src/main_lspd.c]
-LSPD_OBJ = path([build], cat(stem(LSPD_SRC), '.o'))
-LIB_OBJS = filter(OBJS, o -> name(o) != 'main.o')
-lspd_obj = create_cmd(compile, LSPD_OBJ, LSPD_SRC)
-lspd_exe = create_cmd(link, EXED, concat(LIB_OBJS, LSPD_OBJ))
+# fbuild (src/main.cpp) and fbuildd (src/lsp/) each have a main; every other unit goes in both.
+is_lsp     = s -> length(split(to_str(s), "src/lsp/")) > 1
+is_main    = s -> to_str(s) == "src/main.cpp"
+CORE_UNITS = filter(FB_UNITS, u -> (not is_lsp(u.src)) and (not is_main(u.src)))
+MAIN_UNITS = filter(FB_UNITS, u -> is_main(u.src))
+LSP_UNITS  = filter(FB_UNITS, u -> is_lsp(u.src))
 
 
-main = (objs >> exe)
-lsp = objs >> lspd_obj >> lspd_exe
+# -- DEPENDENCIES -------------------------------------------------------------
 
-(run(lsp), log("INFO", "fbuildd built")) when
-	(contains(TARGETS, 'fbuildd') or contains(TARGETS, 'all'))
-and (FORCE or stale(EXED, ...LSPD_OBJ, ...LSPD_SRC, ...SRCS, ...OBJS, ...HDRS))
+# The headers a unit included last time, from the .d file -MMD wrote next to its output.
+# Its words: split at spaces then newlines, without the line continuations and the targets
+# ("obj:", and "header:" from -MP).
+made_deps = d -> filter(concat(...(split(read(d), " ") |> w -> split(w, "\n"))), x -> x != "" and x != "\\" and last(split(x, ":")) != "")
+deps      = u -> made_deps(d) where d = with_suffix(u.obj, ".d") when exists(d) else List<u.src>
 
-log("INFO", "{EXE} up to date") when not (
-	bench('build', run(main)) when (contains(TARGETS, 'all') or length(TARGETS) == 0) and (FORCE or stale(EXE, ...SRCS, ...OBJS, ...HDRS))
-) when not contains(TARGETS, 'install')
-log("INFO", "installed!") when (copy(EXE, join((env('PREFIX_INSTALL_PATH') || [/usr/bin], EXE.name), '/')) when contains(TARGETS, 'install')).name != ''
+# A (label, command) pair: run() shows the label in place of the command line.
+task  = u -> (u.label, u.cmd) when FORCE or stale(u.obj, ...(deps(u) |> x -> path(x)))
+dirty = ts -> length(filter(ts, t -> t != nil)) > 0
+objs  = us -> us |> u -> u.obj
+
+CA_TASKS          = CA_UNITS |> u -> task(u)
+RUNTIME_TASKS     = RUNTIME_UNITS |> u -> task(u)
+FB_TASKS          = FB_UNITS |> u -> task(u)
+PLUGIN_TASKS      = PLUGIN_UNITS |> u -> task(u)
+TEST_PLUGIN_TASKS = TEST_PLUGIN_UNITS |> u -> task(u)
+
+
+# -- ARCHIVES AND LINK --------------------------------------------------------
+
+archive_of = (lib, units, tasks) -> (("remove {name(lib)}", `rm -f {lib}`) >> (name(lib), `ar rcs {lib} {...objs(units)}`))
+	when FORCE or dirty(tasks) or stale(lib, ...objs(units))
+
+archive         = archive_of(LIBCA, CA_UNITS, CA_TASKS)
+runtime_archive = archive_of(RUNTIME, RUNTIME_UNITS, RUNTIME_TASKS)
+
+# -l changes no file: the link also depends on a stamp holding how it links, rewritten only
+# when that changes.
+LINK_STAMP = path("{OUT}/link.stamp")
+mkdir(path(OUT))
+write(LINK_STAMP, "{LINK}\n") when not exists(LINK_STAMP) or read(LINK_STAMP) != "{LINK}\n"
+
+# --export-dynamic: plugins loaded by ca::dl bind to what fbuild (and all of ca) defines. The
+# language server loads the same plugins, so it is linked the same way.
+EXE         = path("{OUT}/fbuild")
+DAEMON      = path("{OUT}/fbuildd")
+EXE_OBJS    = concat(objs(CORE_UNITS), objs(MAIN_UNITS))
+DAEMON_OBJS = concat(objs(CORE_UNITS), objs(LSP_UNITS))
+link_of = (out, os) -> (name(out), `{CXX} {...os} -o {out} {...LDFLAGS} -Wl,--export-dynamic {...LIBS}`)
+	when FORCE or dirty(FB_TASKS) or archive != nil or runtime_archive != nil
+		or stale(out, LINK_STAMP, LIBCA, RUNTIME, ...os)
+link        = link_of(EXE, EXE_OBJS)
+daemon_link = link_of(DAEMON, DAEMON_OBJS)
+
+
+# -- BUILD --------------------------------------------------------------------
+
+UNITS |> u -> mkdir(path(parent(u.obj)))
+
+# ca's include facade (`#include "ca/print.hpp"`) is derived from its tree; its Makefile
+# regenerates it on every build, before anything compiles. It says nothing when nothing changed.
+GEN_INCLUDES = "{CA}/tooling/gen_includes.py"
+FACADE = shell(`python3 {GEN_INCLUDES}`)
+print(FACADE) when FACADE != ""
+
+run(
+	("compile", concat(CA_TASKS, RUNTIME_TASKS, FB_TASKS))
+	>> ("archive", List<archive, runtime_archive>)
+	>> ("link", List<link, daemon_link>)
+	>> ("plugins", concat(PLUGIN_TASKS, TEST_PLUGIN_TASKS))
+)
+
+json_write(path("compile_commands.json"), UNITS |> u -> {
+	directory: cwd, file: to_str(u.src), command: to_str(u.cmd)
+}) when opts.commands
+
+PLUGIN_DIR      = "{OUT}/plugins"
+TEST_PLUGIN_DIR = "{OUT}/test-plugins"
+tests = `env {kv("FBUILD", EXE)} {kv("PLUGINS", PLUGIN_DIR)} {kv("TEST_PLUGINS", TEST_PLUGIN_DIR)} sh tests/run.sh`
+run(("tests", tests)) when opts.tests
+
+
+# -- INSTALL ------------------------------------------------------------------
+
+# Not root: sudo asks for the password once, here, before the runner's live display starts.
+ROOT       = to_int(shell(`id -u`)) == 0
+install_to = (from, to) -> (to, `install -m 755 {from} {to}` when ROOT else `sudo install -m 755 {from} {to}`)
+shell(`sudo -v`) when opts.install and not ROOT
+run(("install", List<install_to(EXE, "/usr/bin/fbuild"), install_to(DAEMON, "/usr/bin/fbuildd")>)) when opts.install

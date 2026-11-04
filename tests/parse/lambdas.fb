@@ -1,0 +1,12 @@
+f = x -> x + 1
+g = a, b -> cat(a, b)
+h = (a, b) -> a * b
+k = (x: Int, y: Int|Float) -> x + y
+l = (xs: List<Int|Float>, t: Tuple<Int, String>) -> xs
+z = () -> 42
+u = ()
+create = (f, artifact, @deps -> f(.artifact, ...deps))
+entry = o, s -> { "file": .s, "obj": .o }
+pair = (x, y), rest -> x
+q = xs |> x -> x * 2 |> y -> y
+w = @ -> 1

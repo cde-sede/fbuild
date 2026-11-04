@@ -1,0 +1,20 @@
+xs : List<Int>
+ys : List<Int>
+names : List<String>
+pairs : List<Tuple<Int, String>>
+total : Int
+head : Int
+evens : List<Int>
+cfg : {found: Bool, cflags: List<String>, libs: List<String>, version: String}
+ok : Bool
+Point : (Int, Int -> Point{x: Int, y: Int})
+p : Point{x: Int, y: Int}
+s : Int
+opts : Parser{force: Bool, jobs: Int, rest: List<String>}
+j : Int
+objs : File
+cmd : Command
+label : Int|String
+pi : Float
+count : Int
+exit 0

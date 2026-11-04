@@ -1,0 +1,7 @@
+xs = List<List<1, 2>>
+t = Tuple<1, ...xs, "a">
+m = Map<("a", 1), ("b", 2),>
+f = File<*[src/main.c], name="x", suffix=".o">
+p = Parser<{ "force": "bool", "jobs": { "type": "int", "default": 1 } }>
+c = a < b
+d = a<b

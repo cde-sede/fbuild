@@ -12,7 +12,9 @@ recursive-descent parser. For what the builtins/values *mean*, see `SKILLS.md`.
 - **Integer**: `[0-9]+`.  **Float**: `[0-9]+.[0-9]+`.
 - **Boolean**: `true` `false`.
 - **Keywords**: `when` `where` `and` `or` `not`. (`true`/`false`/`nil` too.) Everything
-  else that looks like an identifier is an identifier.
+  else that looks like an identifier is an identifier. `else` (right after a `when`
+  condition) and `match` (right before `{`) are contextual: elsewhere they are
+  ordinary identifiers.
 - **String**: `'...'` or `"..."`. Backslash escapes `\<char>`. A string may
   **interpolate** with `{ expr }`: `"out/{name}.o"`. A `#` inside a string is text.
 - **Command**: backtick `` `...` `` — shell-ish word list, may interpolate `{ expr }`
@@ -95,7 +97,8 @@ method Point3D.* = Point.*
    never itself a union) and a value matches if it matches any member.
 4. **sequence** `a >> b` (ordered; build dependency)
 5. **pipe** `a |> f` (= `f(a)`; maps element-wise over a list/tuple)
-6. **guard** `e where b = v, ... when cond` (also `e when cond`)
+6. **guard** `e where b = v, ... when cond else f` (also `e when cond`, `e when cond else f`;
+   `f` extends as far as an expression goes, so `a when c1 else b when c2 else d` chains)
 7. **logical** `and` `or` `||` (and `not e`)
 8. **comparison** `< > <= >= == !=`
 9. **additive** `+ -`
@@ -132,6 +135,8 @@ map literal         { "k": v, k2: e, x, ...m }   (empty: {} ; keys: string or ba
                     local; `...m` spreads m's own key/values in, m a Map or object
                     -- a later entry overrides an earlier spread one on collision)
 parser              Parser<schema>         (schema is a map; see SKILLS.md)
+match               match { pattern [when cond] -> body, ... }   (a function; arms split by
+                    commas or newlines; see SKILLS.md "match")
 ```
 
 ## Constructors
@@ -158,10 +163,24 @@ entry  = o, s -> { "file": .s, "obj": .o }               # .s/.o = projections
 ## Guards
 
 ```
+x    = a when cond else b
+kind = 'neg' when n < 0 else 'zero' when n == 0 else 'pos'
+```
+
+```
 compile = o, s -> `{CC} -c {...s} -o {.o}` when stale(.o, ...s) or FORCE
 val     = e where tmp = heavy(), n = length(tmp) when n > 0
 run(x) when contains(TARGETS, 'all') or length(TARGETS) == 0
 ```
+
+## match patterns
+
+```
+pattern := '_' | literal | NAME [':' Type] | '(' pattern (',' pattern)* ')'
+literal := INT | FLOAT | '-' INT | '-' FLOAT | STRING (no interpolation) | PATH | true | false | nil | ()
+arm     := pattern ['when' cond] '->' body
+```
+A NAME in a pattern always binds (quote a literal string). `(p)` is p itself.
 
 ## Mutable stores (`<-`)
 

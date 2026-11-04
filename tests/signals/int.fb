@@ -1,0 +1,3 @@
+config({ color: true })
+run((`sleep 40`, `sleep 41`) >> `echo never`)
+print("after run")

@@ -22,6 +22,23 @@ of those, `Type|Type|...` (e.g. `x: Int|Float`, `x: Int|String|Point`,
 `xs: List<Int|Float>`) -- a value matches the annotation if it matches any
 one member; unions don't nest. See SYNTAX.md.
 
+## type checking
+
+Every script is type-checked before it runs; any error stops it from running
+(`FILE:LINE:COL: error: ...`, then "N type errors"). `fbuild --check` checks
+without running and also prints warnings; `fbuild --dump-types` prints each
+top-level definition's type and every diagnostic. The checker is gradual: what it
+cannot know (a JSON value, an unannotated lambda parameter) is `?` and fits
+anything, so it only reports what is sure to go wrong: wrong argument counts or
+types for builtins and annotated functions, fields a value cannot have (String,
+File, sized objects, out-of-range tuple indexes), arithmetic on non-numbers,
+comparing unrelated types, calling a non-function, unknown functions, types and
+copied methods, match patterns that can never match, and unbounded recursion
+(a self-call outside every `when`/`else`/match branch). Using an undefined name as
+a value is a warning (it is the bare word's string). Builtins are checked against
+their signatures (`filter : List<a>, (a -> ?) -> List<a>`), so a lambda given to
+one gets typed parameters; plugins give theirs in `fb::builtin::signature`.
+
 ## operators
 
 ```
@@ -49,13 +66,53 @@ and or                 a -> a -> Bool    any type; runtime truthy() decides (not
 not                    a -> Bool         any type; runtime truthy() decides
 where : e where n = v, ...   local bindings for e (let); sequential (later see earlier)
 when  : e when cond          gate: e if cond else nil; cond can be any type (truthy())
+else  : e when cond else f   e if cond, else f (only after a when)
 ```
-Guard tail on an expression: `e where <binds> when <cond>` (where first, so the
-`when` can use the bindings). `where` names things; `when` gates the whole thing.
-Common if/else idiom (since `when` yields `nil` when false):
-`x = (a when cond) || b`  — a if cond else b.
+Guard tail on an expression: `e where <binds> when <cond> else <f>` (where first,
+so the `when` and both branches can use the bindings). `where` names things;
+`when` gates the whole thing; `else` is the value when the gate is closed.
+if/else is `when ... else`, chained to the right:
+```
+x    = a when cond else b
+kind = 'neg' when n < 0 else 'zero' when n == 0 else 'pos'
+run(objs) when stale(exe, ...objs) else print('up to date')
+```
+`else` branches on the condition, not on truthiness: `0 when true else 7` is 0.
+Do not write `(a when cond) || b` for if/else: `||` takes b whenever a is falsy
+(0, "", false, nil), so `(0 when true) || 7` is 7. Keep `||` for "first truthy
+value" (`n = args.1 || 1`).
+In a tuple, `(a, b when c)` drops b when c fails; `(a, b when c else d)` keeps d.
 `nil`/`()` is the only Unit value: `x == nil` is the reliable way to test whether
-a guard fired. `() -> body` is an explicit zero-arity lambda (distinguished from
+a guard fired.
+
+## match
+
+`match { pattern -> body, ... }` is a function (like a lambda): applied to a
+value, the first arm whose pattern takes it runs, with the pattern's names bound;
+no arm taking it gives nil. Arms are separated by commas or newlines.
+```
+flags = os |> match {
+  'linux'  -> List<'-pthread'>,
+  'darwin' -> List<>,
+  _        -> fail('unsupported os', os),
+}
+describe = match {
+  (n: Int) when n < 0 -> 'negative',
+  n: Int              -> "int {n}",
+  s: String           -> 'string',
+  (a, b)              -> 'pair',
+  _                   -> 'other',
+}
+fib = match { 0 -> 0, 1 -> 1, n -> fib(n - 1) + fib(n - 2) }
+srcs |> match { f when suffix(f) == '.c' -> cc(f), f -> cxx(f) }
+```
+Patterns: `_` (anything), a literal (number, -number, quoted string, path, bool,
+nil), a name (binds the value; a bare word in a pattern always binds, so quote
+literal strings), `name: Type` (only values of that type: Int Float Number String
+Bool Path/File Command Unit Map Json List<T> Tuple<...> or a class), a tuple of
+patterns `(p, q)` (a sequence of exactly that length), and any of these followed
+by `when cond`. A pipe over a list maps the match over its elements, as with any
+function. `() -> body` is an explicit zero-arity lambda (distinguished from
 the `()` literal by the `->` immediately after); `@ -> body` also works as an
 n-ary-ignoring lambda if arity truly doesn't matter.
 
@@ -127,7 +184,15 @@ pkgconfig : String -> Map          query pkg-config for a lib; returns
                                     { found:Bool, cflags:List<String>,
                                       libs:List<String>, version:String }
                                     (absent -> found:false, empty lists)
-run     : (Command | Tuple<Command>)... -> Unit
+run     : (Command | Tuple<Command> | Tuple<String, Command>)... -> Unit
+                                      a (String, Command) pair stands in for
+                                      that target in the build display: one
+                                      command prints as the string instead of
+                                      its argv (it still runs the real one), a
+                                      sequence/list gets it as a group label.
+                                      run(("compile", objs), ("link", exe))
+fail    : any... -> never             stop the script: "FILE:LINE:COL: error: <values joined by spaces>"
+assert  : any -> String? -> Unit      fail with the message (or "assertion failed") unless cond is truthy
 print   : any... -> Unit              repr; deferred until run finishes
 debug   : any... -> Unit              typed repr; deferred until run finishes
 ```

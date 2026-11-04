@@ -1,0 +1,5 @@
+print(suffix([.bashrc]), stem([.bashrc]), suffix([a.]), parent([/x]), parent([./a/b.c]), name([a/b/]))
+print(path("a", "/b"), path("a/", "b"), with_suffix([a/b.c], "o"), with_name([./x/y.c], "z"))
+print([./a/b.c].parent, [x.tar.gz].suffix, [x.tar.gz].stem)
+print(glob("paths/**/*.c"), glob("paths/*.c"), glob("paths/sub/.hid/*.c"), length(glob("/etc/host*")) > 0)
+print(File<*[./a/b.c], suffix=".o">)

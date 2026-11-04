@@ -1,0 +1,10 @@
+x false  exit 1  T
+script continues
++ echo a  T
+x sh -c "echo b; exit 3"  exit 3  T
+x run: 1 of 2 failed  T
+--- echo a
+a
+--- sh -c "echo b; exit 3" (exit 3)
+b
+exit 1

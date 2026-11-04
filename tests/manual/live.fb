@@ -1,0 +1,3 @@
+config({ color: true, spinner_ms: 100 })
+objs = (`sh -c "echo one; sleep 0.3; echo two"`, `sleep 0.2`, `echo three`)
+run(("compile", objs) >> `echo link`)

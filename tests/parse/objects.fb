@@ -1,0 +1,14 @@
+type Point(x: Int, y: Int) = { x, y, length: math.sqrt(x * x + y * y) }
+type Empty() = {}
+method Point.repr = self -> "<Point x={self.x} y={self.y}>"
+method Point.len = (x, y) -> x + y
+type Point3D(x, y, z) = { ...Point(x, y), z }
+method Point3D.* = Point.*
+method Point3D.repr = Point.repr
+p = Point(1, 2).repr()
+_GLOBALS.count <- _GLOBALS.count + 1
+_GLOBALS.{i} <- item
+q = p.{k}.0.name
+r ~= ~q
+m = &p
+mm = [a/b] // [c/d]

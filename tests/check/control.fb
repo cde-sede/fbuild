@@ -1,0 +1,5 @@
+# when/else and match: types, and patterns that can never match (see control.expected).
+a = 1 when true else "x"
+loop = n -> loop(n) when n > 0 else loop(n + 1)
+pick = 5 |> match { s: String -> s, 'a' -> 1, (p, q) -> p, _ -> 0 }
+r = (1, 2) |> match { (a, b, c) -> a }

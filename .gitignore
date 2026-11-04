@@ -1,26 +1,3 @@
-# build artifacts
-/fbuild
-/libfbuild.a
-/libfbuild.so
-/build/
-/compile_commands.json
-
-# nob bootstrap
-/nob
-/nob.old
-
-# profiling / scratch
-callgrind.out.*
-cg.out
-cg.log
-midx
-
-
-# graphical examples: not tracked
-graphical/
-
-# tree-sitter generated / built
-tree-sitter-funcbuild/funcbuild.so
-tree-sitter-funcbuild/src/
-tree-sitter-funcbuild/node_modules/
-/fbuildd
+build/
+compile_commands.json
+.cache/

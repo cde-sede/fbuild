@@ -1,0 +1,9 @@
+build = `echo compiling`
+link = `echo linking`
+run(build >> link)
+print("between")
+run((`echo a`, `echo b`))
+run(("label", `echo labelled`))
+run(("grp", (`echo x`, `echo y`)))
+run(`sh -c 'echo out; echo err >&2'`)
+print(shell(`echo captured`), shell((`echo t1`, `echo t2`)))

@@ -1,0 +1,22 @@
+# Each line below has one mistake the checker reports (see errors.expected).
+add = (a: Int, b: Int) -> a + b
+x = add(1, "two")
+y = "a" - 1
+z = [a.c].nope
+t = (1, 2).5
+n = length(1, 2)
+f = filter(List<1>, 3)
+g = undefined_fn(1)
+loop = k -> loop(k - 1)
+type Point(x, y) = { x, y }
+p = Point(1, 2)
+q = p.z
+method Point.norm = self -> self.x + self.y
+method Point3.dup = Point.missing
+c = 1 < "s"
+s = "abc" |> 5
+k = (v: Nope) -> v
+w = bare
+r = math.tau
+h = add(1, 2, 3)
+m = first(5)

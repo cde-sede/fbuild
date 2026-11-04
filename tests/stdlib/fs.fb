@@ -1,0 +1,7 @@
+mkdir([tmp_fs])
+write([tmp_fs/a.txt], "data")
+print(is_file([tmp_fs/a.txt]), is_dir([tmp_fs]), is_dir([tmp_fs/a.txt]))
+print(move([tmp_fs/a.txt], [tmp_fs/b.txt]), exists([tmp_fs/a.txt]), read([tmp_fs/b.txt]))
+print(symlink("b.txt", [tmp_fs/link]), read([tmp_fs/link]))
+print(touch([tmp_fs/c]), is_file([tmp_fs/c]))
+print(remove([tmp_fs/link]), remove([tmp_fs/b.txt]), remove([tmp_fs/c]), remove([tmp_fs]), exists([tmp_fs]), remove([tmp_fs]))

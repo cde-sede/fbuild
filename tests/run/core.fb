@@ -1,0 +1,39 @@
+xs = List<1, 2, 3>
+print(xs, xs |> x -> x * 2, length(xs))
+print(1 + 2 * 3, 7 / 2, 7 % 3, 7.0 / 2, -3, 1.5 + 1, 10 - -2)
+print("a" < "b", 2 >= 2.0, 1 == 1, "x" != "y")
+print(true and false, nil || "dflt", 0 or 1, not 0)
+f = a, b -> cat(a, "-", b)
+print(f("x", "y"), zip(xs, ("a", "b", "c")))
+m = { name: "fb", ver: 4, nested: { k: [a/b.c] } }
+print(m, m.name, m.nested.k.stem, m.nested.k.suffix, keys(m))
+print(json_str(m), json_pretty({ a: List<1, 2> }))
+print(json_parse('{"a": [1, 2.5, "s", true, null], "b": {}}'))
+g = n -> (n when n > 2) || "small"
+print(g(5), g(1))
+v = e where t = 3, u = t * 2 when u > 4
+e = "guarded"
+print(v)
+print(split("a,b,,c", ","), join(("x", "y"), "+"), subst("src/main.c", "src/*.c", "build/*.o"))
+print([src/main.c] // [*.c] // [*.o])
+print(File<*[src/x.c], suffix=".o">, File<*[src/x.c], parent="out", stem="y">)
+print(to_int("42abc"), to_float("2.5e1"), to_str(3.0), to_int(9.9))
+type Point(x, y) = { x, y }
+method Point.sum = self -> self.x + self.y
+method Point.prod = (x, y) -> x * y
+p = Point(3, 4)
+print(p, p.sum(), p.prod(), p.x)
+debug(p, 1, 2.0, "s", [f], (1, 2), `echo {p.x}`)
+_GLOBALS.count <- 1
+_GLOBALS.count <- _GLOBALS.count + 41
+print(_GLOBALS.count, _GLOBALS)
+print(concat(xs, (4, 5), 6, nil), filter(xs, x -> x > 1), contains(xs, 2), first(xs), last(xs))
+print("interp {1 + 1} and {xs}")
+c ~= 1
+c ~= c + 1
+print(c)
+print(with_suffix([a/b.c], "o"), with_name([a/b.c], "z.h"), path("a", "", "b"), parent([x]), name("a/b"))
+print(Tuple<1, ...xs, 5>, (...xs), Map<("k", 1), ("j", 2)>)
+r = (f, a, @rest -> f(.a, ...rest))
+print(r(x -> x, 5, 6, 7))
+print(items({ a: 1 }), has({ a: 1 }, "a"), get({ a: 1 }, "b"))

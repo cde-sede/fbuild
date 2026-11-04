@@ -1,0 +1,12 @@
+compile = o, s -> `{CC} -c {...s} -o {.o}` when stale(.o, ...s) or FORCE
+val = e where tmp = heavy(), n = length(tmp) when n > 0
+x = (a when cond) || b
+y = a
+	where b = 1,
+	      c = 2
+	when b
+	  and c
+z = not a == b and c or d
+n = - -3 * -x % 2
+r = a >> b >> c
+s = ...xs |> f

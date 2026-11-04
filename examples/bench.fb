@@ -1,8 +1,0 @@
-
-EMPTY = run(``)
-n = args.1 || 1
-t = clock()
-r = @ -> print((.2 - .0))
-f = t, run(EMPTY), clock()
-
-r(f)

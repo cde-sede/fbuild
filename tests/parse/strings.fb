@@ -1,0 +1,12 @@
+a = "out/{name}.o"
+b = 'raw {not} interp'
+c = "esc \" {x} \{y}"
+d = `cc '-DX="a b"' {...FLAGS} -o {.o} "q{x}"`
+e = "{ "nested {x}" }"
+f = `echo {`inner`}`
+g = 1.5 + 2 - 3.25
+h = [/usr/bin]
+i = "multi {
+  a +
+  b
+} done"

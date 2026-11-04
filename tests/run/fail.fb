@@ -1,0 +1,3 @@
+run(`false` >> `echo after`)
+print("script continues")
+run((`echo a`, `sh -c "echo b; exit 3"`))

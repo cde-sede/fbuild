@@ -1,0 +1,31 @@
++ build: echo compiling  T
++ link: echo linking  T
++ run: 2 steps  T
+between
++ echo a  T
++ echo b  T
++ run: 2 steps  T
++ label  T
++ grp: echo x  T
++ grp: echo y  T
++ grp: 2 steps  T
++ sh -c 'echo out; echo err >&2'  T
+captured (t1, t2)
+--- echo compiling
+compiling
+--- echo linking
+linking
+--- echo a
+a
+--- echo b
+b
+--- label
+labelled
+--- echo x
+x
+--- echo y
+y
+--- sh -c 'echo out; echo err >&2'
+out
+err
+exit 0

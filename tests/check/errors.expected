@@ -1,0 +1,37 @@
+add : (Int, Int -> Int)
+x : Int
+y : Int|Float
+z : ?
+t : ?
+n : Int
+f : List<Int>
+g : ?
+loop : (? -> ?)
+Point : (?, ? -> Point{x: ?, y: ?})
+p : Point{x: ?, y: ?}
+q : ?
+c : Bool
+s : ?
+k : (? -> ?)
+w : ?
+r : ?
+h : Int
+m : ?
+error 3:13: argument 2 of add is String, expected Int
+error 4:9: arithmetic operand must be Int or Float, got String
+error 5:11: File has no field 'nope'
+error 6:12: Tuple<Int, Int> has no element 5
+error 7:5: length expects 1 argument, got 2
+error 8:21: argument 2 of filter is Int, expected (Int -> ?)
+error 9:5: unknown function 'undefined_fn'
+error 10:13: unbounded recursion: 'loop' calls itself with no 'when' guard (no base case)
+error 13:7: Point has no field 'z'
+error 15:27: Point has no method 'missing' (above this line)
+error 16:7: cannot compare Int with String
+error 17:14: cannot pipe into Int
+error 18:9: unknown type 'Nope'
+warning 19:5: 'bare' is not defined: it stands for the string "bare"
+error 20:10: math has no field or method 'tau'
+error 21:5: add takes 2 arguments, got 3
+error 22:11: argument 1 of first is Int, expected List<?>
+exit 1

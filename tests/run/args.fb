@@ -1,0 +1,8 @@
+o = Parser<{
+	release:  {short: "-r", type: "bool"},
+	commands: {short: "-c", type: "bool"},
+	quiet:    {short: "-q", type: "bool"},
+	jobs:     {short: "-j", type: "int", default: 1},
+	init:     {short: "-I", type: "str", default: "ush"},
+}>
+print(o.release, o.commands, o.quiet, o.jobs, o.init, o.rest)

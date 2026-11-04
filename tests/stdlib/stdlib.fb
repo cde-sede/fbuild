@@ -1,0 +1,12 @@
+print(range(5), range(2, 5), iter(3), iter(2, "x"), enumerate(("a", "b")))
+print(slice(range(10), 2, -2), take(range(5), 2), take(range(5), -1), drop(range(5), 3), reverse(range(3)), flatten(((1, 2), 3, List<4, 5>)))
+print(sort(("pear", "apple", "fig", "apple")), unique(("a", "b", "a", "c", "b")), count(("a", "b", "a"), "a"))
+print(sum(range(5)), sum(1, 2, 3), min(4, 2, 8), max(range(7)), fold(range(5), 0, (acc, x) -> acc + x), index(("a", "b"), "b"), index(range(5), 9))
+_GLOBALS.n <- 0
+print(while(_GLOBALS.n < 3, i -> (_GLOBALS.n <- _GLOBALS.n + 1)), _GLOBALS.n)
+print(upper("abC1"), lower("ABc"), capitalize("hELLO"), title("the quick  brown"), trim("  x y  "), lstrip("  x "), rstrip(" x  "))
+print(starts_with("hello", "he"), ends_with("hello", "lo"), strip_prefix("libfoo", "lib"), strip_suffix("a.o", ".o"), strip_suffix("a.o", ".c"))
+print(find("hello", "l"), find("hello", "l", 3), find("hello", "z"), find("hello", "l", -2), rfind("hello", "l"), rfind("abc", ""), occurrences("aaaa", "aa"))
+print(repeat("ab", 3), chars("abc"), words("  a b\tc\n"), partition("k=v=w", "="), partition("kv", "="), substr("hello", 1, -1), substr("hello", -3))
+print(replace("a.b.c", ".", "::"), pad_left("7", 3, "0"), pad_right("ab", 4), center("x", 5, "*"), center("abc", 2))
+print(is_alpha("abc"), is_alpha(""), is_digit("123"), is_alnum("a1"), is_space(" \t"), is_upper("ABC1"), is_lower("abc"), is_upper("123"), ord("A"), chr(66))

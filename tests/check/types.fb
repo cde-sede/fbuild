@@ -1,0 +1,21 @@
+# What the checker infers (see types.expected).
+xs = List<1, 2, 3>
+ys = xs |> x -> x * 2
+names = glob("*.c") |> stem
+pairs = zip(xs, names)
+total = fold(xs, 0, (acc, x) -> acc + x)
+head = first(xs)
+evens = filter(xs, x -> x % 2 == 0)
+cfg = pkgconfig("zlib")
+ok = cfg.found
+type Point(x: Int, y: Int) = { x, y }
+p = Point(1, 2)
+method Point.sum = self -> self.x + self.y
+s = p.sum()
+opts = Parser<{ "force": "bool", "jobs": "int" }>
+j = opts.jobs
+objs = [src/a.c] |> [src/*.c] // [build/*.o]
+cmd = `cc -c {objs}`
+label = (1 when ok) || "none"
+pi = math.pi
+count = length(args)

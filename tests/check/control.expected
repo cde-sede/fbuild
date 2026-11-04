@@ -1,0 +1,9 @@
+a : Int|String
+loop : (? -> ?)
+pick : ?
+r : List<?>
+error 4:21: pattern 's: String' can never match Int
+error 4:38: a String pattern can never match Int
+error 4:47: a tuple pattern can never match Int
+error 5:23: a tuple pattern can never match Int
+exit 1

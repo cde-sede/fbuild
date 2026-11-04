@@ -1,0 +1,32 @@
+# when/else, match, fail and assert (see control.expected).
+x = 0 when true else 7
+print(x)
+kind = n -> 'neg' when n < 0 else 'zero' when n == 0 else 'pos'
+print(kind(-3), kind(0), kind(5))
+fact = n -> 1 when n <= 1 else n * fact(n - 1)
+print(fact(10))
+v = 0 where k = 3 when k > 5 else k * 2
+print(v)
+print((1, 2 when false else 9, 3))
+describe = match {
+  (n: Int) when n < 0 -> 'negative',
+  n: Int              -> "int {n}",
+  s: String           -> "string {s}",
+  (a, b)              -> "pair {a}/{b}",
+  'x'                 -> 'never',
+  _                   -> 'other',
+}
+print((-2, 4, 'hi', (1, 2), 1.5) |> describe)
+os = 'linux'
+flags = os |> match {
+  'linux'  -> '-pthread'
+  'darwin' -> ''
+  _        -> fail('unsupported os', os)
+}
+print(flags)
+fib = match { 0 -> 0, 1 -> 1, n -> fib(n - 1) + fib(n - 2) }
+print(fib(15))
+assert(fact(3) == 6, 'fact broken')
+print(match { 1 -> 'one' }(2))
+'linux2' |> match { 'linux' -> 1, _ -> fail('unsupported os', 'linux2') }
+print('not reached')

@@ -1,0 +1,11 @@
+0
+neg zero pos
+3628800
+6
+(1, 9, 3)
+[negative, int 4, string hi, pair 1/2, other]
+-pthread
+610
+()
+control.fb:31:40: error: unsupported os linux2
+exit 1
